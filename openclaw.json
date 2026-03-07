@@ -1,4 +1,7 @@
 {
+  "gateway": {
+    "mode": "local"
+  },
   "agents": {
     "defaults": {
       "model": { "primary": "google/gemini-2.5-pro" }
