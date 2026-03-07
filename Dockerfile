@@ -7,4 +7,4 @@ RUN mkdir -p /root/.openclaw
 
 COPY openclaw.json /root/.openclaw/openclaw.json
 
-CMD ["sh", "-c", "openclaw gateway --port ${PORT:-8080}"]
+CMD ["sh", "-c", "openclaw gateway --host 0.0.0.0 --port ${PORT:-8080}"]
