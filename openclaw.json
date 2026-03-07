@@ -1,0 +1,10 @@
+{
+  "models": {
+    "google": { "apiKey": "${OPENCLAW_GOOGLE_API_KEY}" }
+  },
+  "agents": {
+    "defaults": {
+      "model": { "primary": "google/gemini-2.5-pro" }
+    }
+  }
+}
