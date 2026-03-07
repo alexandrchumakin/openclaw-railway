@@ -1,6 +1,7 @@
 {
   "gateway": {
-    "mode": "local"
+    "mode": "local",
+    "host": "0.0.0.0"
   },
   "agents": {
     "defaults": {
