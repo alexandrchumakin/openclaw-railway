@@ -15,8 +15,8 @@ echo "OPENCLAW AUTH TOKEN: $TOKEN"
 echo "Open: https://openclaw-railway-production-c433.up.railway.app/chat?session=main&token=$TOKEN"
 echo "============================================"
 
-# Start socat to forward $PORT -> 18789
-socat TCP-LISTEN:${PORT:-8080},fork,reuseaddr,bind=0.0.0.0 TCP:127.0.0.1:18789 &
+# Proxy $PORT -> 18791 (browser control UI which serves both HTTP and WS)
+socat TCP-LISTEN:${PORT:-8080},fork,reuseaddr,bind=0.0.0.0 TCP:127.0.0.1:18791 &
 
 # Wait for openclaw process
 wait $OPENCLAW_PID
