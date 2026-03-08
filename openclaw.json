@@ -10,7 +10,7 @@
   },
   "agents": {
     "defaults": {
-      "model": { "primary": "google/gemini-2.0-flash" }
+      "model": { "primary": "groq/llama-3.3-70b-versatile" }
     }
   }
 }
