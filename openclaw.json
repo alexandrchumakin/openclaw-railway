@@ -6,9 +6,6 @@
       "allowedOrigins": ["https://openclaw-railway-production-c433.up.railway.app"],
       "allowInsecureAuth": true,
       "dangerouslyDisableDeviceAuth": true
-    },
-    "rateLimit": {
-      "enabled": false
     }
   },
   "agents": {
