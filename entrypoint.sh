@@ -12,11 +12,10 @@ sleep 5
 TOKEN=$(node -e "const c=JSON.parse(require('fs').readFileSync('/root/.openclaw/openclaw.json','utf8')); console.log(c.gateway?.auth?.token || 'no-token')")
 echo "============================================"
 echo "OPENCLAW AUTH TOKEN: $TOKEN"
-echo "Open: https://openclaw-railway-production-c433.up.railway.app/chat?session=main&token=$TOKEN"
 echo "============================================"
 
-# Proxy $PORT -> 18791 (browser control UI which serves both HTTP and WS)
-socat TCP-LISTEN:${PORT:-8080},fork,reuseaddr,bind=0.0.0.0 TCP:127.0.0.1:18791 &
+# Proxy $PORT -> 18789 (main gateway, serves both HTTP API and WebSocket)
+socat TCP-LISTEN:${PORT:-8080},fork,reuseaddr,bind=0.0.0.0 TCP:127.0.0.1:18789 &
 
 # Wait for openclaw process
 wait $OPENCLAW_PID
