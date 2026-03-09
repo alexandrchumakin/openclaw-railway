@@ -10,7 +10,8 @@
   },
   "channels": {
     "telegram": {
-      "enabled": true
+      "enabled": true,
+      "groupPolicy": "open"
     }
   },
   "agents": {
