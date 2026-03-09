@@ -34,8 +34,13 @@ openclaw onboard \
   --skip-ui \
   --skip-search 2>&1 || echo "Onboard completed"
 
-# Merge our template config, fix context window, inject domain
+# Copy SOUL.md with domain injected
 DOMAIN="${RAILWAY_PUBLIC_DOMAIN:-localhost}"
+mkdir -p /root/.openclaw/workspace /root/.openclaw/agents/main/agent
+sed "s/RAILWAY_DOMAIN/$DOMAIN/g" /opt/SOUL.md > /root/.openclaw/agents/main/agent/SOUL.md
+cp /root/.openclaw/agents/main/agent/SOUL.md /root/.openclaw/workspace/SOUL.md
+
+# Merge our template config, fix context window
 node -e "
 const fs = require('fs');
 const cfg = JSON.parse(fs.readFileSync('/root/.openclaw/openclaw.json','utf8'));
@@ -47,11 +52,6 @@ if (cfg.models?.providers?.['cursor-proxy']?.models?.[0]) {
   cfg.models.providers['cursor-proxy'].models[0].maxTokens = 16384;
 }
 cfg.tools = { profile: 'full' };
-// Inject system prompt with actual domain
-const sp = tpl.agents?.defaults?.systemPrompt || '';
-if (cfg.agents?.defaults) {
-  cfg.agents.defaults.systemPrompt = sp.replace('RAILWAY_DOMAIN', '${DOMAIN}');
-}
 fs.writeFileSync('/root/.openclaw/openclaw.json', JSON.stringify(cfg, null, 2));
 "
 

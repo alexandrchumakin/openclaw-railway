@@ -22,6 +22,7 @@ ENV OPENCLAW_NO_RESPAWN=1
 RUN mkdir -p /var/tmp/openclaw-compile-cache
 
 COPY search-proxy.js /opt/search-proxy.js
+COPY SOUL.md /opt/SOUL.md
 COPY router.js /opt/router.js
 COPY openclaw.json /root/.openclaw/openclaw-template.json
 COPY entrypoint.sh /entrypoint.sh
