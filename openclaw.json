@@ -16,8 +16,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "openai/gpt-4o",
-        "fallbacks": ["groq/llama-3.3-70b-versatile"]
+        "primary": "groq/llama-3.3-70b-versatile"
       }
     }
   }
