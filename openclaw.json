@@ -11,7 +11,8 @@
   "channels": {
     "telegram": {
       "enabled": true,
-      "groupPolicy": "open"
+      "groupPolicy": "open",
+      "dmPolicy": "open"
     }
   },
   "agents": {
