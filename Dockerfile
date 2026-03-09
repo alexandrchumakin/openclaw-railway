@@ -1,7 +1,7 @@
 FROM node:22-slim
 
 RUN apt-get update && apt-get install -y git socat && rm -rf /var/lib/apt/lists/*
-RUN npm install -g openclaw@latest
+RUN npm install -g openclaw@2026.2.26
 
 RUN mkdir -p /root/.openclaw/agents/main/sessions /root/.openclaw/credentials
 RUN chmod 700 /root/.openclaw

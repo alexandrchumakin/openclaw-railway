@@ -8,9 +8,17 @@
       "dangerouslyDisableDeviceAuth": true
     }
   },
+  "channels": {
+    "telegram": {
+      "enabled": true
+    }
+  },
   "agents": {
     "defaults": {
-      "model": { "primary": "groq/llama-3.3-70b-versatile" }
+      "model": {
+        "primary": "openai/gpt-4o",
+        "fallbacks": ["groq/llama-3.3-70b-versatile"]
+      }
     }
   }
 }
