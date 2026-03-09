@@ -3,7 +3,9 @@ FROM node:22-slim
 RUN apt-get update && apt-get install -y git socat curl && rm -rf /var/lib/apt/lists/*
 
 # Install Cursor CLI (agent)
-RUN curl https://cursor.com/install -fsS | bash || true
+RUN curl https://cursor.com/install -fsS | bash
+ENV PATH="/root/.local/bin:${PATH}"
+ENV CURSOR_AGENT_BIN="/root/.local/bin/agent"
 
 # Install OpenClaw
 RUN npm install -g openclaw@latest
