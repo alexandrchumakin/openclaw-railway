@@ -30,13 +30,19 @@ openclaw onboard \
   --skip-ui \
   --skip-search 2>&1 || echo "Onboard completed"
 
-# Merge our template config (telegram, gateway settings)
+# Merge our template config and fix context window
 node -e "
 const fs = require('fs');
 const cfg = JSON.parse(fs.readFileSync('/root/.openclaw/openclaw.json','utf8'));
 const tpl = JSON.parse(fs.readFileSync('/root/.openclaw/openclaw-template.json','utf8'));
 cfg.gateway = {...(cfg.gateway||{}), ...tpl.gateway};
 cfg.channels = tpl.channels;
+// Fix context window and tools profile
+if (cfg.models?.providers?.['cursor-proxy']?.models?.[0]) {
+  cfg.models.providers['cursor-proxy'].models[0].contextWindow = 200000;
+  cfg.models.providers['cursor-proxy'].models[0].maxTokens = 16384;
+}
+cfg.tools = { profile: 'default', web: { enabled: true } };
 fs.writeFileSync('/root/.openclaw/openclaw.json', JSON.stringify(cfg, null, 2));
 "
 
