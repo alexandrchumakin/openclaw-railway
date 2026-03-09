@@ -1,6 +1,6 @@
 FROM node:22-slim
 
-RUN apt-get update && apt-get install -y git socat curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y git socat curl netcat-openbsd && rm -rf /var/lib/apt/lists/*
 
 # Install Cursor CLI (agent)
 RUN curl https://cursor.com/install -fsS | bash

@@ -49,7 +49,16 @@ fs.writeFileSync('/root/.openclaw/openclaw.json', JSON.stringify(cfg, null, 2));
 # Start openclaw gateway
 openclaw gateway --port 18789 &
 OPENCLAW_PID=$!
-sleep 5
+
+# Wait until gateway is actually listening
+echo "Waiting for gateway to start..."
+for i in $(seq 1 30); do
+  if nc -z 127.0.0.1 18789 2>/dev/null; then
+    echo "Gateway ready on port 18789"
+    break
+  fi
+  sleep 1
+done
 
 # Extract the generated auth token
 TOKEN=$(node -e "const c=JSON.parse(require('fs').readFileSync('/root/.openclaw/openclaw.json','utf8')); console.log(c.gateway?.auth?.token || 'no-token')")
@@ -59,7 +68,7 @@ echo "OPENCLAW AUTH TOKEN: $TOKEN"
 echo "https://$DOMAIN/chat?session=main&token=$TOKEN"
 echo "============================================"
 
-# Proxy $PORT -> 18789
+# Now start socat proxy (gateway is confirmed ready)
 socat TCP-LISTEN:${PORT:-8080},fork,reuseaddr,bind=0.0.0.0 TCP:127.0.0.1:18789 &
 
 # Wait for openclaw process
