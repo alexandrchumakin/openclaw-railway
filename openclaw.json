@@ -11,15 +11,15 @@
   "channels": {
     "telegram": {
       "enabled": true,
-      "groupPolicy": "open",
       "dmPolicy": "open",
-      "allowFrom": ["*"]
+      "allowFrom": ["*"],
+      "groupPolicy": "open"
     }
   },
   "agents": {
     "defaults": {
       "model": {
-        "primary": "groq/llama-3.3-70b-versatile"
+        "primary": "cursor-proxy/claude-sonnet-4"
       }
     }
   }

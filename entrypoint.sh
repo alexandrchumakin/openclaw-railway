@@ -6,22 +6,54 @@ rm -rf /root/.openclaw/agents/main/sessions/*
 rm -f /root/.openclaw/openclaw.json.bak
 rm -rf /root/.openclaw/cache
 
-# Start openclaw gateway in background
+# Start cursor-api-proxy in background (port 8765)
+cd /opt/cursor-api-proxy
+CURSOR_API_KEY="${CURSOR_API_KEY}" npm start &
+CURSOR_PID=$!
+sleep 3
+echo "Cursor API proxy started on port 8765"
+
+# Run onboard to register cursor proxy as custom provider
+openclaw onboard \
+  --non-interactive \
+  --accept-risk \
+  --auth-choice custom-api-key \
+  --custom-base-url "http://127.0.0.1:8765/v1" \
+  --custom-api-key "unused" \
+  --custom-provider-id "cursor-proxy" \
+  --custom-model-id "claude-sonnet-4" \
+  --custom-compatibility openai \
+  --skip-channels \
+  --skip-daemon \
+  --skip-health \
+  --skip-skills \
+  --skip-ui \
+  --skip-search 2>&1 || echo "Onboard completed"
+
+# Merge our template config (telegram, gateway settings)
+node -e "
+const fs = require('fs');
+const cfg = JSON.parse(fs.readFileSync('/root/.openclaw/openclaw.json','utf8'));
+const tpl = JSON.parse(fs.readFileSync('/root/.openclaw/openclaw-template.json','utf8'));
+cfg.gateway = {...(cfg.gateway||{}), ...tpl.gateway};
+cfg.channels = tpl.channels;
+fs.writeFileSync('/root/.openclaw/openclaw.json', JSON.stringify(cfg, null, 2));
+"
+
+# Start openclaw gateway
 openclaw gateway --port 18789 &
 OPENCLAW_PID=$!
-
-# Wait for gateway to start
 sleep 5
 
-# Extract the generated auth token from config and log it
+# Extract the generated auth token
 TOKEN=$(node -e "const c=JSON.parse(require('fs').readFileSync('/root/.openclaw/openclaw.json','utf8')); console.log(c.gateway?.auth?.token || 'no-token')")
-DOMAIN="${RAILWAY_PUBLIC_DOMAIN:-openclaw-railway-production-c433.up.railway.app}"
+DOMAIN="${RAILWAY_PUBLIC_DOMAIN:-localhost}"
 echo "============================================"
 echo "OPENCLAW AUTH TOKEN: $TOKEN"
 echo "https://$DOMAIN/chat?session=main&token=$TOKEN"
 echo "============================================"
 
-# Proxy $PORT -> 18789 (main gateway, serves both HTTP API and WebSocket)
+# Proxy $PORT -> 18789
 socat TCP-LISTEN:${PORT:-8080},fork,reuseaddr,bind=0.0.0.0 TCP:127.0.0.1:18789 &
 
 # Wait for openclaw process
