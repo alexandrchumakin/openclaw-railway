@@ -21,6 +21,7 @@ ENV NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache
 ENV OPENCLAW_NO_RESPAWN=1
 RUN mkdir -p /var/tmp/openclaw-compile-cache
 
+COPY search-proxy.js /opt/search-proxy.js
 COPY openclaw.json /root/.openclaw/openclaw-template.json
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

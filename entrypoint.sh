@@ -6,6 +6,10 @@ rm -rf /root/.openclaw/agents/main/sessions/*
 rm -f /root/.openclaw/openclaw.json.bak
 rm -rf /root/.openclaw/cache
 
+# Start search proxy (free DuckDuckGo-based web search)
+node /opt/search-proxy.js &
+echo "Search proxy started on port 9876"
+
 # Start cursor-api-proxy in background (port 8765)
 cd /opt/cursor-api-proxy
 CURSOR_API_KEY="${CURSOR_API_KEY}" npm start &
@@ -42,7 +46,14 @@ if (cfg.models?.providers?.['cursor-proxy']?.models?.[0]) {
   cfg.models.providers['cursor-proxy'].models[0].contextWindow = 200000;
   cfg.models.providers['cursor-proxy'].models[0].maxTokens = 16384;
 }
-cfg.tools = { profile: 'messaging' };
+cfg.tools = {
+  profile: 'full',
+  web: {
+    enabled: true,
+    provider: 'brave',
+    baseUrl: 'http://127.0.0.1:9876'
+  }
+};
 fs.writeFileSync('/root/.openclaw/openclaw.json', JSON.stringify(cfg, null, 2));
 "
 
