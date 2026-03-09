@@ -17,12 +17,17 @@ CURSOR_PID=$!
 sleep 3
 echo "Cursor API proxy started on port 8765"
 
-# Run onboard to register cursor proxy as custom provider
+# Start search-injecting middleware between OpenClaw and cursor-api-proxy
+SEARCH_MIDDLEWARE_PORT=8766 node /opt/search-middleware.js &
+sleep 1
+echo "Search middleware started on port 8766"
+
+# Run onboard to register cursor proxy via middleware (not directly)
 openclaw onboard \
   --non-interactive \
   --accept-risk \
   --auth-choice custom-api-key \
-  --custom-base-url "http://127.0.0.1:8765/v1" \
+  --custom-base-url "http://127.0.0.1:8766/v1" \
   --custom-api-key "unused" \
   --custom-provider-id "cursor-proxy" \
   --custom-model-id "claude-sonnet-4" \
