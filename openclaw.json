@@ -10,7 +10,8 @@
   },
   "channels": {
     "telegram": {
-      "enabled": true
+      "enabled": true,
+      "mode": "polling"
     }
   },
   "agents": {
