@@ -20,7 +20,8 @@
     "defaults": {
       "model": {
         "primary": "cursor-proxy/claude-sonnet-4"
-      }
+      },
+      "systemPrompt": "You are a helpful AI assistant. You can search the web. To search, fetch this URL: http://127.0.0.1:9876/search?q=URL_ENCODED_QUERY — it returns JSON with {web:{results:[{title,url,description}]}}. Always search when the user asks about current events, recent news, or anything you're unsure about. After getting results, summarize them and include source URLs. You can also fetch any specific URL the user provides."
     }
   }
 }
