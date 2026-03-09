@@ -34,19 +34,24 @@ openclaw onboard \
   --skip-ui \
   --skip-search 2>&1 || echo "Onboard completed"
 
-# Merge our template config and fix context window
+# Merge our template config, fix context window, inject domain
+DOMAIN="${RAILWAY_PUBLIC_DOMAIN:-localhost}"
 node -e "
 const fs = require('fs');
 const cfg = JSON.parse(fs.readFileSync('/root/.openclaw/openclaw.json','utf8'));
 const tpl = JSON.parse(fs.readFileSync('/root/.openclaw/openclaw-template.json','utf8'));
 cfg.gateway = {...(cfg.gateway||{}), ...tpl.gateway};
 cfg.channels = tpl.channels;
-// Fix context window and tools profile
 if (cfg.models?.providers?.['cursor-proxy']?.models?.[0]) {
   cfg.models.providers['cursor-proxy'].models[0].contextWindow = 200000;
   cfg.models.providers['cursor-proxy'].models[0].maxTokens = 16384;
 }
 cfg.tools = { profile: 'full' };
+// Inject system prompt with actual domain
+const sp = tpl.agents?.defaults?.systemPrompt || '';
+if (cfg.agents?.defaults) {
+  cfg.agents.defaults.systemPrompt = sp.replace('RAILWAY_DOMAIN', '${DOMAIN}');
+}
 fs.writeFileSync('/root/.openclaw/openclaw.json', JSON.stringify(cfg, null, 2));
 "
 
@@ -77,8 +82,8 @@ echo "OPENCLAW AUTH TOKEN: $TOKEN"
 echo "https://$DOMAIN/chat?session=main&token=$TOKEN"
 echo "============================================"
 
-# Now start socat proxy (gateway is confirmed ready)
-socat TCP-LISTEN:${PORT:-8080},fork,reuseaddr,bind=0.0.0.0 TCP:127.0.0.1:18789 &
+# Start router (handles both OpenClaw + search proxy on $PORT)
+node /opt/router.js &
 
 # Wait for openclaw process
 wait $OPENCLAW_PID
