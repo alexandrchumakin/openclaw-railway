@@ -42,7 +42,7 @@ if (cfg.models?.providers?.['cursor-proxy']?.models?.[0]) {
   cfg.models.providers['cursor-proxy'].models[0].contextWindow = 200000;
   cfg.models.providers['cursor-proxy'].models[0].maxTokens = 16384;
 }
-cfg.tools = { profile: 'default' };
+cfg.tools = { profile: 'messaging' };
 fs.writeFileSync('/root/.openclaw/openclaw.json', JSON.stringify(cfg, null, 2));
 "
 
