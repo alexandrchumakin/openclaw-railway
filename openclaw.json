@@ -12,7 +12,8 @@
     "telegram": {
       "enabled": true,
       "groupPolicy": "open",
-      "dmPolicy": "open"
+      "dmPolicy": "open",
+      "allowFrom": ["*"]
     }
   },
   "agents": {
