@@ -35,7 +35,8 @@ async function searchDDG(query, count = 5) {
 }
 
 const server = http.createServer(async (req, res) => {
-  if (req.method === 'GET' && req.url.startsWith('/search')) {
+  // Handle both /search and /res/v1/web/search (Brave API format)
+  if (req.method === 'GET' && (req.url.startsWith('/search') || req.url.startsWith('/res/v1/web/search'))) {
     const params = new URL(req.url, 'http://localhost').searchParams;
     const q = params.get('q');
     if (!q) {

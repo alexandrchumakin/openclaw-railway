@@ -46,16 +46,14 @@ if (cfg.models?.providers?.['cursor-proxy']?.models?.[0]) {
   cfg.models.providers['cursor-proxy'].models[0].contextWindow = 200000;
   cfg.models.providers['cursor-proxy'].models[0].maxTokens = 16384;
 }
-cfg.tools = {
-  profile: 'full',
-  web: {
-    enabled: true,
-    provider: 'brave',
-    baseUrl: 'http://127.0.0.1:9876'
-  }
-};
+cfg.tools = { profile: 'full' };
 fs.writeFileSync('/root/.openclaw/openclaw.json', JSON.stringify(cfg, null, 2));
 "
+
+# Set fake Brave API key so OpenClaw enables web_search tool
+# Our search proxy on port 9876 mimics the Brave API
+export BRAVE_API_KEY="free-local-proxy"
+export BRAVE_SEARCH_BASE_URL="http://127.0.0.1:9876"
 
 # Start openclaw gateway
 openclaw gateway --port 18789 &
