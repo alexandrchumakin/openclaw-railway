@@ -52,12 +52,17 @@ const cfg = JSON.parse(fs.readFileSync('/root/.openclaw/openclaw.json','utf8'));
 const tpl = JSON.parse(fs.readFileSync('/root/.openclaw/openclaw-template.json','utf8'));
 cfg.gateway = {...(cfg.gateway||{}), ...tpl.gateway};
 cfg.channels = tpl.channels;
-if (cfg.models?.providers?.['cursor-proxy']?.models?.[0]) {
-  cfg.models.providers['cursor-proxy'].models[0].contextWindow = 200000;
-  cfg.models.providers['cursor-proxy'].models[0].maxTokens = 16384;
+if (cfg.models?.providers?.['cursor-proxy']) {
+  // Force routing through search middleware on port 8766
+  cfg.models.providers['cursor-proxy'].baseUrl = 'http://127.0.0.1:8766/v1';
+  if (cfg.models.providers['cursor-proxy'].models?.[0]) {
+    cfg.models.providers['cursor-proxy'].models[0].contextWindow = 200000;
+    cfg.models.providers['cursor-proxy'].models[0].maxTokens = 16384;
+  }
 }
 cfg.tools = { profile: 'full' };
 fs.writeFileSync('/root/.openclaw/openclaw.json', JSON.stringify(cfg, null, 2));
+console.log('Provider baseUrl:', cfg.models?.providers?.['cursor-proxy']?.baseUrl);
 "
 
 # Set fake Brave API key so OpenClaw enables web_search tool
