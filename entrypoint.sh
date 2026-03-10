@@ -58,7 +58,7 @@ cp /root/.openclaw/agents/main/agent/SOUL.md /root/.openclaw/workspace/SOUL.md
 node -e "
 const fs = require('fs');
 const cfg = JSON.parse(fs.readFileSync('/root/.openclaw/openclaw.json','utf8'));
-const tpl = JSON.parse(fs.readFileSync('/root/.openclaw/openclaw-template.json','utf8'));
+const tpl = JSON.parse(fs.readFileSync('/opt/openclaw-template.json','utf8'));
 cfg.gateway = {...(cfg.gateway||{}), ...tpl.gateway};
 cfg.channels = tpl.channels;
 if (cfg.models?.providers?.['cursor-proxy']) {
