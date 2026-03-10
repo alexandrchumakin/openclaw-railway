@@ -18,8 +18,26 @@ function searchDDG(query) {
   });
 }
 
+// Extract actual user text from OpenClaw's metadata wrapper
+function extractUserText(content) {
+  if (!content) return '';
+  // OpenClaw wraps messages like:
+  // "Conversation info (untrusted metadata):\n```json\n{...}\n```\n\nActual message here"
+  // Or sometimes the actual text is after the JSON block
+  const jsonBlockEnd = content.indexOf('```\n\n');
+  if (jsonBlockEnd !== -1) {
+    return content.substring(jsonBlockEnd + 5).trim();
+  }
+  // Also try triple backtick without double newline
+  const altEnd = content.lastIndexOf('```');
+  if (altEnd > 10) {
+    return content.substring(altEnd + 3).trim();
+  }
+  return content;
+}
+
 function detectSearchIntent(text) {
-  if (!text || text.length < 5) return null;
+  if (!text || text.length < 3) return null;
   const lower = text.toLowerCase();
   // Explicit search commands
   const explicit = [
@@ -36,7 +54,9 @@ function detectSearchIntent(text) {
   const keywords = [
     'search', 'latest news', 'current', 'recent', 'today',
     'what happened', 'who won', 'weather', 'price of',
-    'how much', 'when is', 'where is', 'найди', 'поищи', 'zoek'
+    'how much is', 'when is', 'where is',
+    'найди', 'поищи', 'погода', 'новости',
+    'zoek', 'weer', 'nieuws'
   ];
   if (keywords.some(k => lower.includes(k))) return text;
   return null;
@@ -56,13 +76,17 @@ async function handleRequest(req, res) {
         const lastMsg = messages[messages.length - 1];
 
         if (lastMsg && lastMsg.role === 'user') {
-          const content = typeof lastMsg.content === 'string' ? lastMsg.content :
+          const rawContent = typeof lastMsg.content === 'string' ? lastMsg.content :
             (Array.isArray(lastMsg.content) ? lastMsg.content.map(c => c.text || '').join(' ') : '');
-          console.log(`[search-middleware] Last user message: "${content.substring(0, 100)}"`);
-          const query = detectSearchIntent(content);
+
+          // Extract actual user text from OpenClaw metadata wrapper
+          const userText = extractUserText(rawContent);
+          console.log(`[search-middleware] Extracted user text: "${userText.substring(0, 150)}"`);
+
+          const query = detectSearchIntent(userText);
 
           if (query) {
-            console.log(`[search-middleware] Search detected: "${query}"`);
+            console.log(`[search-middleware] Search detected: "${query.substring(0, 100)}"`);
             try {
               const results = await searchDDG(query);
               const webResults = results?.web?.results || [];
@@ -74,19 +98,21 @@ async function handleRequest(req, res) {
                 // Insert search results before the last user message
                 messages.splice(messages.length - 1, 0, {
                   role: 'system',
-                  content: `Web search results for "${query}":\n\n${searchContext}\n\nUse these search results to answer the user's question. Always cite source URLs.`
+                  content: `Web search results for "${query.substring(0, 80)}":\n\n${searchContext}\n\nUse these search results to answer the user's question. Always cite source URLs.`
                 });
                 payload.messages = messages;
                 body = JSON.stringify(payload);
-                console.log(`[search-middleware] Injected ${webResults.length} results`);
+                console.log(`[search-middleware] Injected ${webResults.length} search results`);
               }
             } catch(e) {
               console.error('[search-middleware] Search error:', e.message);
             }
+          } else {
+            console.log(`[search-middleware] No search intent detected`);
           }
         }
       } catch(e) {
-        // Not valid JSON, forward as-is
+        console.error('[search-middleware] Parse error:', e.message);
       }
     }
 
