@@ -20,33 +20,42 @@ function searchDDG(query) {
   });
 }
 
-function fetchPage(url, maxChars = 3000) {
+function fetchPage(url, maxChars = 2000) {
   return new Promise((resolve) => {
-    const mod = url.startsWith('https') ? https : http;
-    const req = mod.get(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Bot/1.0)' }, timeout: 5000 }, (res) => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return fetchPage(res.headers.location, maxChars).then(resolve);
-      }
-      if (res.statusCode !== 200) return resolve('');
-      let data = '';
-      res.on('data', c => {
-        data += c;
-        if (data.length > maxChars * 3) res.destroy();
+    // Hard timeout - never hang more than 4 seconds
+    const timer = setTimeout(() => resolve(''), 4000);
+
+    try {
+      const mod = url.startsWith('https') ? https : http;
+      const req = mod.get(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Bot/1.0)', 'Accept': 'text/html' },
+        timeout: 3000
+      }, (res) => {
+        if (res.statusCode !== 200) { clearTimeout(timer); return resolve(''); }
+        let data = '';
+        res.on('data', c => {
+          data += c;
+          if (data.length > maxChars * 3) { res.destroy(); }
+        });
+        res.on('end', () => {
+          clearTimeout(timer);
+          let text = data
+            .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+            .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/&[a-z]+;/gi, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          resolve(text.substring(0, maxChars));
+        });
+        res.on('error', () => { clearTimeout(timer); resolve(''); });
       });
-      res.on('end', () => {
-        // Strip HTML tags, scripts, styles
-        let text = data
-          .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-          .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-          .replace(/<[^>]+>/g, ' ')
-          .replace(/&[a-z]+;/gi, ' ')
-          .replace(/\s+/g, ' ')
-          .trim();
-        resolve(text.substring(0, maxChars));
-      });
-    });
-    req.on('error', () => resolve(''));
-    req.on('timeout', () => { req.destroy(); resolve(''); });
+      req.on('error', () => { clearTimeout(timer); resolve(''); });
+      req.on('timeout', () => { clearTimeout(timer); req.destroy(); resolve(''); });
+    } catch(e) {
+      clearTimeout(timer);
+      resolve('');
+    }
   });
 }
 
@@ -119,16 +128,21 @@ async function handleRequest(req, res) {
               const results = await searchDDG(query);
               const webResults = results?.web?.results || [];
               if (webResults.length > 0) {
-                // Fetch content from top 3 pages
-                const pageFetches = webResults.slice(0, 3).map(async (r) => {
-                  try {
-                    const content = await fetchPage(r.url, 2000);
-                    return { ...r, pageContent: content };
-                  } catch(e) {
-                    return { ...r, pageContent: '' };
-                  }
-                });
-                const enrichedResults = await Promise.all(pageFetches);
+                // Fetch content from top 3 pages (with 8s total timeout)
+                const enrichedResults = await Promise.race([
+                  Promise.all(webResults.slice(0, 3).map(async (r) => {
+                    try {
+                      const content = await fetchPage(r.url, 2000);
+                      return { ...r, pageContent: content };
+                    } catch(e) {
+                      return { ...r, pageContent: '' };
+                    }
+                  })),
+                  new Promise(resolve => setTimeout(() => {
+                    console.log('[search-middleware] Page fetch timeout (8s), using snippets only');
+                    resolve(webResults.slice(0, 3).map(r => ({ ...r, pageContent: '' })));
+                  }, 8000))
+                ]);
 
                 const searchContext = enrichedResults.map((r, i) => {
                   let entry = `[${i+1}] ${r.title}\n    URL: ${r.url}\n    ${r.description}`;
