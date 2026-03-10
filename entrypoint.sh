@@ -30,7 +30,7 @@ openclaw onboard \
   --custom-base-url "http://127.0.0.1:8766/v1" \
   --custom-api-key "unused" \
   --custom-provider-id "cursor-proxy" \
-  --custom-model-id "claude-sonnet-4" \
+  --custom-model-id "claude-4.6-opus-thinking" \
   --custom-compatibility openai \
   --skip-channels \
   --skip-daemon \

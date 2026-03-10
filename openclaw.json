@@ -14,13 +14,13 @@
       "dmPolicy": "open",
       "allowFrom": ["*"],
       "groupPolicy": "open",
-      "blockStreaming": true
+      "streaming": "off"
     }
   },
   "agents": {
     "defaults": {
       "model": {
-        "primary": "cursor-proxy/claude-sonnet-4"
+        "primary": "cursor-proxy/claude-4.6-opus-thinking"
       }
     }
   }
