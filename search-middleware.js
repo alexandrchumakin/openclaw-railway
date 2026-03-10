@@ -6,6 +6,8 @@ const PORT = parseInt(process.env.SEARCH_MIDDLEWARE_PORT || '8766');
 const CURSOR_PROXY_PORT = 8765;
 const SEARCH_PORT = 9876;
 
+const https = require('https');
+
 function searchDDG(query) {
   return new Promise((resolve, reject) => {
     http.get(`http://127.0.0.1:${SEARCH_PORT}/search?q=${encodeURIComponent(query)}&count=5`, (res) => {
@@ -15,6 +17,36 @@ function searchDDG(query) {
         try { resolve(JSON.parse(data)); } catch(e) { reject(e); }
       });
     }).on('error', reject);
+  });
+}
+
+function fetchPage(url, maxChars = 3000) {
+  return new Promise((resolve) => {
+    const mod = url.startsWith('https') ? https : http;
+    const req = mod.get(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Bot/1.0)' }, timeout: 5000 }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return fetchPage(res.headers.location, maxChars).then(resolve);
+      }
+      if (res.statusCode !== 200) return resolve('');
+      let data = '';
+      res.on('data', c => {
+        data += c;
+        if (data.length > maxChars * 3) res.destroy();
+      });
+      res.on('end', () => {
+        // Strip HTML tags, scripts, styles
+        let text = data
+          .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+          .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/&[a-z]+;/gi, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        resolve(text.substring(0, maxChars));
+      });
+    });
+    req.on('error', () => resolve(''));
+    req.on('timeout', () => { req.destroy(); resolve(''); });
   });
 }
 
@@ -87,18 +119,39 @@ async function handleRequest(req, res) {
               const results = await searchDDG(query);
               const webResults = results?.web?.results || [];
               if (webResults.length > 0) {
-                const searchContext = webResults.map((r, i) =>
-                  `[${i+1}] ${r.title}\n    URL: ${r.url}\n    ${r.description}`
+                // Fetch content from top 3 pages
+                const pageFetches = webResults.slice(0, 3).map(async (r) => {
+                  try {
+                    const content = await fetchPage(r.url, 2000);
+                    return { ...r, pageContent: content };
+                  } catch(e) {
+                    return { ...r, pageContent: '' };
+                  }
+                });
+                const enrichedResults = await Promise.all(pageFetches);
+
+                const searchContext = enrichedResults.map((r, i) => {
+                  let entry = `[${i+1}] ${r.title}\n    URL: ${r.url}\n    ${r.description}`;
+                  if (r.pageContent) {
+                    entry += `\n    Page content:\n    ${r.pageContent.substring(0, 2000)}`;
+                  }
+                  return entry;
+                }).join('\n\n');
+
+                // Add remaining results without page content
+                const remaining = webResults.slice(3).map((r, i) =>
+                  `[${i+4}] ${r.title}\n    URL: ${r.url}\n    ${r.description}`
                 ).join('\n\n');
 
-                // Insert search results before the last user message
+                const fullContext = remaining ? searchContext + '\n\n' + remaining : searchContext;
+
                 messages.splice(messages.length - 1, 0, {
                   role: 'system',
-                  content: `Web search results for "${query.substring(0, 80)}":\n\n${searchContext}\n\nUse these search results to answer the user's question. Always cite source URLs.`
+                  content: `Web search results for "${query.substring(0, 80)}" (with page content from top results):\n\n${fullContext}\n\nUse these search results AND the page content to give a detailed, helpful answer. Include specific details like prices, product names, and links. Always cite source URLs.`
                 });
                 payload.messages = messages;
                 body = JSON.stringify(payload);
-                console.log(`[search-middleware] Injected ${webResults.length} search results`);
+                console.log(`[search-middleware] Injected ${webResults.length} results (${enrichedResults.filter(r => r.pageContent).length} with page content)`);
               }
             } catch(e) {
               console.error('[search-middleware] Search error:', e.message);
