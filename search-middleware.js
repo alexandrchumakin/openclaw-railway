@@ -41,27 +41,21 @@ function extractUserText(content) {
 function detectSearchIntent(text) {
   if (!text || text.length < 3) return null;
   const lower = text.toLowerCase();
-  // Explicit search commands
-  const explicit = [
-    /^search\s+(for\s+)?(.+)/i,
-    /^find\s+(info|information|out)\s+(about\s+)?(.+)/i,
-    /^google\s+(.+)/i,
-    /^look\s+up\s+(.+)/i,
+
+  // Only skip search for very short conversational messages
+  const skipPatterns = [
+    /^(hi|hello|hey|thanks|thank you|ok|yes|no|bye|good|great|cool|nice|lol|haha)\b/i,
+    /^(привет|спасибо|да|нет|ок|хорошо|пока)\b/i,
+    /^(hoi|bedankt|ja|nee|doei)\b/i,
   ];
-  for (const p of explicit) {
-    const m = text.match(p);
-    if (m) return m[m.length - 1];
-  }
-  // Keywords suggesting search needed
-  const keywords = [
-    'search', 'latest news', 'current', 'recent', 'today',
-    'what happened', 'who won', 'weather', 'price of',
-    'how much is', 'when is', 'where is',
-    'найди', 'поищи', 'погода', 'новости',
-    'zoek', 'weer', 'nieuws'
-  ];
-  if (keywords.some(k => lower.includes(k))) return text;
-  return null;
+  if (skipPatterns.some(p => p.test(lower)) && text.length < 30) return null;
+
+  // Skip if it's a translation request
+  if (/^(translate|vertaal|переведи)/i.test(lower)) return null;
+
+  // Search for everything else that looks like a question or info request
+  // This is intentionally aggressive — better to search too much than too little
+  return text;
 }
 
 async function handleRequest(req, res) {
