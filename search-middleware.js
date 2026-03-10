@@ -112,15 +112,6 @@ async function handleRequest(req, res) {
       }
     }
 
-    // Force disable streaming to prevent duplicate messages
-    if (req.method === 'POST' && req.url.includes('/chat/completions')) {
-      try {
-        const p = JSON.parse(body);
-        p.stream = false;
-        body = JSON.stringify(p);
-      } catch(e) {}
-    }
-
     // Forward to cursor-api-proxy
     const proxyReq = http.request({
       hostname: '127.0.0.1',
