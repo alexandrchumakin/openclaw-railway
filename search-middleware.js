@@ -112,7 +112,8 @@ async function handleRequest(req, res) {
       }
     }
 
-    // Forward to cursor-api-proxy
+    // Forward to cursor-api-proxy, buffer and deduplicate response
+    const isChat = req.method === 'POST' && req.url.includes('/chat/completions');
     const proxyReq = http.request({
       hostname: '127.0.0.1',
       port: CURSOR_PROXY_PORT,
@@ -120,8 +121,87 @@ async function handleRequest(req, res) {
       method: req.method,
       headers: { ...req.headers, 'content-length': Buffer.byteLength(body), host: `127.0.0.1:${CURSOR_PROXY_PORT}` },
     }, (proxyRes) => {
-      res.writeHead(proxyRes.statusCode, proxyRes.headers);
-      proxyRes.pipe(res);
+      if (!isChat) {
+        res.writeHead(proxyRes.statusCode, proxyRes.headers);
+        proxyRes.pipe(res);
+        return;
+      }
+
+      // Buffer full response to deduplicate
+      let responseData = '';
+      proxyRes.on('data', c => responseData += c);
+      proxyRes.on('end', () => {
+        try {
+          // Check if it's SSE streaming
+          if (proxyRes.headers['content-type']?.includes('text/event-stream')) {
+            // Parse SSE events, collect content chunks
+            const lines = responseData.split('\n');
+            let fullContent = '';
+            for (const line of lines) {
+              if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                try {
+                  const chunk = JSON.parse(line.slice(6));
+                  const delta = chunk.choices?.[0]?.delta?.content || '';
+                  fullContent += delta;
+                } catch(e) {}
+              }
+            }
+
+            // Deduplicate: check if content is repeated
+            if (fullContent.length > 100) {
+              const half = Math.floor(fullContent.length / 2);
+              const first = fullContent.substring(0, half);
+              const second = fullContent.substring(half);
+              // If second half starts the same as first half, it's duplicated
+              if (first.length > 50 && second.startsWith(first.substring(0, Math.min(200, first.length)))) {
+                console.log(`[search-middleware] Deduplicated response (${fullContent.length} -> ${first.length} chars)`);
+                fullContent = first;
+              }
+            }
+
+            // Return as non-streaming response
+            const result = JSON.stringify({
+              id: 'dedup-' + Date.now(),
+              object: 'chat.completion',
+              choices: [{
+                index: 0,
+                message: { role: 'assistant', content: fullContent },
+                finish_reason: 'stop'
+              }]
+            });
+            res.writeHead(200, {
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(result)
+            });
+            res.end(result);
+          } else {
+            // Non-streaming JSON response - check for duplicates
+            try {
+              const json = JSON.parse(responseData);
+              let content = json.choices?.[0]?.message?.content || '';
+              if (content.length > 100) {
+                const half = Math.floor(content.length / 2);
+                const first = content.substring(0, half);
+                const second = content.substring(half);
+                if (first.length > 50 && second.startsWith(first.substring(0, Math.min(200, first.length)))) {
+                  console.log(`[search-middleware] Deduplicated JSON response`);
+                  json.choices[0].message.content = first;
+                  responseData = JSON.stringify(json);
+                }
+              }
+            } catch(e) {}
+            res.writeHead(proxyRes.statusCode, {
+              ...proxyRes.headers,
+              'content-length': Buffer.byteLength(responseData)
+            });
+            res.end(responseData);
+          }
+        } catch(e) {
+          console.error('[search-middleware] Response processing error:', e.message);
+          res.writeHead(proxyRes.statusCode, proxyRes.headers);
+          res.end(responseData);
+        }
+      });
     });
     proxyReq.on('error', (e) => {
       res.writeHead(502);
