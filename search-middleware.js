@@ -132,50 +132,54 @@ async function handleRequest(req, res) {
       proxyRes.on('data', c => responseData += c);
       proxyRes.on('end', () => {
         try {
-          // Check if it's SSE streaming
           if (proxyRes.headers['content-type']?.includes('text/event-stream')) {
-            // Parse SSE events, collect content chunks
+            // Parse SSE events, collect content and track where duplicate starts
             const lines = responseData.split('\n');
             let fullContent = '';
+            let events = [];
             for (const line of lines) {
               if (line.startsWith('data: ') && line !== 'data: [DONE]') {
                 try {
                   const chunk = JSON.parse(line.slice(6));
                   const delta = chunk.choices?.[0]?.delta?.content || '';
+                  events.push({ line, content: delta });
                   fullContent += delta;
-                } catch(e) {}
+                } catch(e) {
+                  events.push({ line, content: '' });
+                }
               }
             }
 
-            // Deduplicate: check if content is repeated
+            // Detect duplicate: if second half repeats first half
+            let cutAfterChars = fullContent.length;
             if (fullContent.length > 100) {
               const half = Math.floor(fullContent.length / 2);
               const first = fullContent.substring(0, half);
               const second = fullContent.substring(half);
-              // If second half starts the same as first half, it's duplicated
               if (first.length > 50 && second.startsWith(first.substring(0, Math.min(200, first.length)))) {
-                console.log(`[search-middleware] Deduplicated response (${fullContent.length} -> ${first.length} chars)`);
-                fullContent = first;
+                cutAfterChars = half;
+                console.log(`[search-middleware] Deduplicated SSE (${fullContent.length} -> ${cutAfterChars} chars)`);
               }
             }
 
-            // Return as non-streaming response
-            const result = JSON.stringify({
-              id: 'dedup-' + Date.now(),
-              object: 'chat.completion',
-              choices: [{
-                index: 0,
-                message: { role: 'assistant', content: fullContent },
-                finish_reason: 'stop'
-              }]
+            // Rebuild SSE stream, cutting off at dedup point
+            let charsSent = 0;
+            let output = '';
+            for (const evt of events) {
+              if (charsSent >= cutAfterChars && evt.content) break;
+              output += evt.line + '\n\n';
+              charsSent += evt.content.length;
+            }
+            output += 'data: [DONE]\n\n';
+
+            res.writeHead(proxyRes.statusCode, {
+              ...proxyRes.headers,
+              'content-length': undefined,
+              'transfer-encoding': 'chunked'
             });
-            res.writeHead(200, {
-              'Content-Type': 'application/json',
-              'Content-Length': Buffer.byteLength(result)
-            });
-            res.end(result);
+            res.end(output);
           } else {
-            // Non-streaming JSON response - check for duplicates
+            // Non-streaming JSON response
             try {
               const json = JSON.parse(responseData);
               let content = json.choices?.[0]?.message?.content || '';
@@ -190,14 +194,11 @@ async function handleRequest(req, res) {
                 }
               }
             } catch(e) {}
-            res.writeHead(proxyRes.statusCode, {
-              ...proxyRes.headers,
-              'content-length': Buffer.byteLength(responseData)
-            });
+            res.writeHead(proxyRes.statusCode, proxyRes.headers);
             res.end(responseData);
           }
         } catch(e) {
-          console.error('[search-middleware] Response processing error:', e.message);
+          console.error('[search-middleware] Response error:', e.message);
           res.writeHead(proxyRes.statusCode, proxyRes.headers);
           res.end(responseData);
         }
