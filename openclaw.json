@@ -14,7 +14,7 @@
       "dmPolicy": "open",
       "allowFrom": ["*"],
       "groupPolicy": "open",
-      "blockStreamingCoalesce": "always"
+      "blockStreamingCoalesce": { "enabled": true }
     }
   },
   "agents": {
