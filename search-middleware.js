@@ -172,11 +172,10 @@ async function handleRequest(req, res) {
             }
             output += 'data: [DONE]\n\n';
 
-            res.writeHead(proxyRes.statusCode, {
-              ...proxyRes.headers,
-              'content-length': undefined,
-              'transfer-encoding': 'chunked'
-            });
+            const headers = { ...proxyRes.headers };
+            delete headers['content-length'];
+            headers['transfer-encoding'] = 'chunked';
+            res.writeHead(proxyRes.statusCode, headers);
             res.end(output);
           } else {
             // Non-streaming JSON response
