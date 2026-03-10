@@ -1,165 +1,206 @@
-# OpenClaw Railway Gateway
+# OpenClaw + Cursor AI Gateway on Railway
 
-Self-hosted OpenClaw AI gateway deployed on Railway, designed to work with the OpenClaw Android app for real-time AI assistant capabilities on mobile.
+AI assistant accessible via Telegram, powered by Cursor's Claude 4.6 Opus (Thinking) through OpenClaw gateway, with free DuckDuckGo web search.
 
 ## Architecture
 
 ```
-OnePlus 13 (OpenClaw Android) → HTTPS → Railway (OpenClaw Gateway) → Gemini API
+Telegram Bot ← OpenClaw Gateway ← Search Middleware ← cursor-api-proxy ← Cursor Agent CLI
+     ↑                                    ↑
+     |                              DuckDuckGo Search Proxy
+  OnePlus 13                        (fetches pages too)
 ```
 
-- **Gateway**: Runs on Railway ($5/mo Hobby plan), always-on
-- **LLM**: Google Gemini 2.5 Pro via free-tier API
-- **Android**: OpenClaw node connects to the gateway over HTTPS
-- **Use cases**: Real-time translation summaries, conversation recording analysis, general AI assistant
+- **Gateway**: OpenClaw on Railway ($5/mo Hobby plan)
+- **LLM**: Claude 4.6 Opus (Thinking) via Cursor API key + cursor-api-proxy
+- **Search**: Free DuckDuckGo search with page content fetching (no API key needed)
+- **Channels**: Telegram bot (primary), web dashboard (limited)
+- **Persistence**: Railway volume at `/root/.openclaw` preserves sessions across deploys
+
+## Components
+
+| Component | Port | Purpose |
+|-----------|------|---------|
+| OpenClaw Gateway | 18789 | Main gateway, manages sessions, channels, agents |
+| cursor-api-proxy | 8765 | Translates OpenAI API → Cursor Agent CLI |
+| Search Middleware | 8766 | Intercepts LLM calls, injects web search results |
+| DuckDuckGo Search Proxy | 9876 | Scrapes DuckDuckGo, fetches top 3 page contents |
+| Router | $PORT (8080) | Public entry point, routes to gateway + search |
 
 ## Quick Start
 
-### 1. Deploy to Railway
+### 1. Prerequisites
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/template)
+- [Railway](https://railway.com) Hobby account ($5/mo)
+- [Cursor](https://cursor.com) subscription with API key
+- Telegram bot token from [@BotFather](https://t.me/BotFather)
 
-Or manually:
+### 2. Deploy
+
 1. Fork this repo
-2. Create a new Railway project → "GitHub Repo" → select this repo
-3. Railway auto-detects the Dockerfile and builds
+2. Railway → New Project → GitHub Repo → select this repo
+3. Railway auto-detects Dockerfile and builds
 
-### 2. Set Environment Variables
-
-In Railway **Variables** tab:
+### 3. Set Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GEMINI_API_KEY` | Yes | Google Gemini API key from [aistudio.google.com/apikey](https://aistudio.google.com/apikey) |
-| `PORT` | No | Railway injects this automatically. Set to `18789` if needed |
+| `CURSOR_API_KEY` | Yes | Cursor API key (from Cursor IDE settings or `agent login`) |
+| `TELEGRAM_BOT_TOKEN` | Yes | Telegram bot token from @BotFather |
+| `FORCE_REINIT` | No | Set to `1` to force full re-onboard on next deploy (then remove) |
 
-**Optional provider keys** (add any to switch providers):
+### 4. Add Persistent Volume
 
-| Variable | Provider |
-|----------|----------|
-| `ANTHROPIC_API_KEY` | Claude (Opus, Sonnet, Haiku) |
-| `OPENAI_API_KEY` | GPT-4o, o1, etc. |
-| `OPENROUTER_API_KEY` | Any model via OpenRouter |
+Railway → Service → Settings → Volumes → Add Volume:
+- **Mount Path**: `/root/.openclaw`
+- **Size**: 1 GB
 
-### 3. Generate Public Domain
+This preserves conversations, sessions, memory, and auth tokens across deploys.
 
-Railway → Settings → Networking → "Generate Domain"
+### 5. Generate Public Domain
 
-You'll get: `https://<your-service>.up.railway.app`
+Railway → Service → Settings → Networking → Generate Domain
 
-### 4. Connect Android Phone
+### 6. Access
 
-Install OpenClaw on Android (APK from [docs.openclaw.ai/platforms/android](https://docs.openclaw.ai/platforms/android)):
-
-1. Open OpenClaw Android app
-2. Settings → Gateway → Manual connection
-3. Enter your Railway public URL: `https://<your-service>.up.railway.app`
-4. Tap Connect
+- **Telegram**: Message your bot directly
+- **Web Dashboard**: Use the URL with token from deploy logs
 
 ## Project Structure
 
 ```
-├── Dockerfile          # Node 22 container with OpenClaw gateway
-├── openclaw.json       # Agent config (model selection, defaults)
-├── CLAUDE.md           # Instructions for Claude Code / Claude agents
-├── AGENTS.md           # Instructions for Codex CLI / OpenAI agents
-└── README.md           # This file
+├── Dockerfile              # Container: Node 22 + Cursor CLI + OpenClaw + cursor-api-proxy
+├── entrypoint.sh           # Startup orchestrator (onboard, config merge, process management)
+├── openclaw.json           # OpenClaw config template (channels, gateway, model settings)
+├── SOUL.md                 # Agent personality and instructions (injected into workspace)
+├── search-proxy.js         # DuckDuckGo search proxy (port 9876)
+├── search-middleware.js     # Intercepts LLM calls, injects search results + page content
+├── router.js               # HTTP/WebSocket router (public port → gateway + search)
+├── CLAUDE.md               # Instructions for Claude Code agents
+├── AGENTS.md               # Instructions for Codex CLI / OpenAI agents
+└── README.md               # This file
 ```
+
+## How Web Search Works
+
+The search is transparent to the LLM — it doesn't need to "search" itself:
+
+1. User sends message via Telegram
+2. OpenClaw forwards to Search Middleware (port 8766)
+3. Middleware detects search intent (keywords, questions, etc.)
+4. Middleware searches DuckDuckGo and fetches top 3 page contents
+5. Results are injected as a system message before the user's message
+6. cursor-api-proxy receives enriched context and responds with real data
+7. Response is deduplicated and sent back through OpenClaw to Telegram
+
+Search is aggressive by default — almost every message triggers a search unless it's a short greeting or translation request.
+
+## Persistence & State
+
+With the Railway volume mounted at `/root/.openclaw`:
+
+- **Sessions**: Conversation history persists across deploys
+- **Memory**: Agent memory files persist
+- **Auth token**: Gateway token stays the same (no more token_mismatch on dashboard)
+- **Config**: Merged on every boot (template + onboard result)
+
+### Force Reset
+
+To wipe all state and start fresh:
+1. Add Railway variable: `FORCE_REINIT=1`
+2. Deploy (triggers full re-onboard)
+3. Remove `FORCE_REINIT` variable after deploy
 
 ## Configuration
 
 ### Changing the LLM Model
 
-Edit `openclaw.json`:
+Edit `entrypoint.sh` → `--custom-model-id` parameter:
+
+```bash
+--custom-model-id "claude-4.6-opus-thinking"   # Current default
+--custom-model-id "claude-4.6-opus"            # Non-thinking variant
+--custom-model-id "gpt-5.4-fast"               # GPT fallback
+--custom-model-id "claude-sonnet-4"             # Faster, cheaper
+```
+
+Also update `openclaw.json` → `agents.defaults.model.primary` to match.
+
+### Modifying Agent Personality
+
+Edit `SOUL.md` — this is injected into the OpenClaw workspace on every boot. Changes take effect on next deploy without FORCE_REINIT.
+
+### Telegram Channel Settings
+
+Edit `openclaw.json` → `channels.telegram`:
 
 ```json
 {
-  "agents": {
-    "defaults": {
-      "model": { "primary": "google/gemini-2.5-pro" }
-    }
+  "telegram": {
+    "enabled": true,
+    "dmPolicy": "open",
+    "allowFrom": ["*"],
+    "groupPolicy": "open",
+    "blockStreamingCoalesce": {}
   }
 }
 ```
 
-Available model formats:
-- `google/gemini-2.5-pro` — Google Gemini (free tier available)
-- `anthropic/claude-opus-4-6` — Claude Opus (requires `ANTHROPIC_API_KEY`)
-- `anthropic/claude-haiku-4-5` — Claude Haiku (cheap, fast)
-- `openai/gpt-4o` — GPT-4o (requires `OPENAI_API_KEY`)
-- `openrouter/anthropic/claude-opus-4-6` — Any model via OpenRouter
+To restrict access, replace `["*"]` with specific Telegram user IDs.
 
-### Adding Agents
+### Search Tuning
 
-Extend `openclaw.json` with custom agents:
-
-```json
-{
-  "agents": {
-    "defaults": {
-      "model": { "primary": "google/gemini-2.5-pro" }
-    },
-    "translator": {
-      "model": { "primary": "google/gemini-2.5-pro" },
-      "systemPrompt": "You are a translator. Translate Dutch to Russian. Be concise."
-    },
-    "summarizer": {
-      "model": { "primary": "google/gemini-2.5-pro" },
-      "systemPrompt": "Summarize conversations with key points, action items, and decisions."
-    }
-  }
-}
-```
-
-## Use Case: Dutch-Russian Translation + Meeting Summaries
-
-This gateway was built for a specific workflow:
-
-1. **Real-time translation**: Use [RTranslator](https://github.com/niedev/RTranslator) on-device (offline, zero latency)
-2. **Conversation summaries**: Send audio/text to OpenClaw gateway → Gemini generates structured notes
-3. **Background recording**: OpenClaw Android node records ambient audio, sends to gateway for processing
-
-### Recommended Android Apps
-
-| App | Purpose | Install |
-|-----|---------|---------|
-| OpenClaw Android | AI gateway client | [APK from docs](https://docs.openclaw.ai/platforms/android) |
-| RTranslator | Offline Dutch↔Russian translation | [GitHub](https://github.com/niedev/RTranslator) |
-| Plaud Note | Meeting transcription + summaries | [Google Play](https://play.google.com/store/apps/details?id=ai.plaud.android.plaud) |
+Edit `search-middleware.js`:
+- `detectSearchIntent()` — controls when search triggers
+- `fetchPage()` — page content fetching (3s timeout per page, 8s total)
+- Top 3 results get full page content, remaining get snippets only
 
 ## Troubleshooting
 
-### Gateway won't start
-- Check logs in Railway Deployments tab
-- Run `openclaw doctor --fix` via Railway shell
-- Verify `GEMINI_API_KEY` is set correctly (starts with `AIzaSy...`)
+### Bot doesn't respond
+- Check Railway deploy logs for errors
+- Verify `CURSOR_API_KEY` is valid
+- Check if cursor-api-proxy started: look for `cursor-api-proxy listening on http://127.0.0.1:8765`
 
-### "Config invalid" error
-- Don't put API keys in `openclaw.json` — use environment variables
-- Model format must be `provider/model-name`
+### "No response generated"
+- Usually caused by empty streaming chunks from Cursor thinking model
+- The deduplication middleware should handle this — check for `Response error` in logs
 
-### Android can't connect
-- Ensure you generated a **public** domain (not `.railway.internal`)
-- Check the URL starts with `https://`
-- Verify gateway shows "1/1 service online" in Railway dashboard
+### Duplicate messages
+- The search middleware deduplicates by comparing first/second halves of response
+- If still happening, check `[search-middleware] Deduplicated` in logs
 
-### Bad Gateway (502)
-- Gateway process crashed — check deployment logs
-- Usually a config error or missing API key
+### Search not working
+- Check for `[search-middleware] Search detected` in logs
+- If no detection: the message didn't match search keywords
+- If detected but no results: DuckDuckGo may be rate-limiting
+
+### "Config invalid" on deploy
+- OpenClaw's config schema is strict — unknown keys cause crashes
+- Test changes locally: `docker build -t test . && docker run -e CURSOR_API_KEY=fake -e PORT=8080 test`
+- Check the exact error message for the invalid key
+
+### Web dashboard shows "token_mismatch"
+- Close old browser tabs (they have stale tokens)
+- Use the fresh URL from deploy logs
+- With persistent volume, the token stays the same across deploys
+
+### Force fresh start
+- Add `FORCE_REINIT=1` to Railway variables, deploy, then remove it
 
 ## Cost
 
 | Component | Cost |
 |-----------|------|
 | Railway Hobby | $5/mo (includes $5 usage credit) |
-| Gemini 2.5 Pro API | Free tier: 50 RPD / 2M TPM |
+| Cursor API | Included in Cursor subscription |
+| DuckDuckGo Search | Free (no API key) |
 | OpenClaw | Free (MIT license) |
-| **Total** | **~$5/month** |
+| **Total** | **~$5/month** + Cursor subscription |
 
 ## Links
 
 - [OpenClaw Docs](https://docs.openclaw.ai)
-- [OpenClaw GitHub](https://github.com/openclaw/openclaw)
+- [cursor-api-proxy](https://github.com/anyrobert/cursor-api-proxy)
 - [Railway Docs](https://docs.railway.com)
-- [Google AI Studio](https://aistudio.google.com)
-
+- [Cursor Agent CLI](https://cursor.com/install)

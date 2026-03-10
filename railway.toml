@@ -1,0 +1,6 @@
+[deploy]
+startCommand = "/entrypoint.sh"
+
+[[volumes]]
+mount = "/root/.openclaw"
+name = "openclaw-data"

@@ -2,61 +2,93 @@
 
 ## Project Summary
 
-OpenClaw AI gateway on Railway. Docker container running Node 22 + OpenClaw npm package. Connects to Google Gemini 2.5 Pro. Serves an Android phone (OnePlus 13) via HTTPS.
+OpenClaw AI gateway on Railway using Cursor (Claude 4.6 Opus Thinking) as the LLM backend, with Telegram as the primary channel and a custom DuckDuckGo web search system that injects real page content into LLM context.
+
+## Architecture
+
+```
+User (Telegram) → OpenClaw Gateway (:18789)
+    → Search Middleware (:8766) [detects search, fetches pages, injects results]
+    → cursor-api-proxy (:8765) [translates OpenAI API → Cursor Agent CLI]
+    → Cursor Agent CLI [runs Claude 4.6 Opus Thinking]
+
+Public traffic: Router (:$PORT) → Gateway (:18789) | Search Proxy (:9876)
+```
 
 ## Files
 
 ```
-Dockerfile          → Container: node:22-slim + git + openclaw@latest
-openclaw.json       → Agent config (model selection, system prompts)
-CLAUDE.md           → Claude Code agent instructions
-AGENTS.md           → This file (Codex CLI instructions)
-README.md           → Human-readable docs
+Dockerfile              → Node 22 + Cursor CLI + OpenClaw + cursor-api-proxy
+entrypoint.sh           → Startup: onboard (first boot only), config merge, process management
+openclaw.json           → Config template (channels, gateway, model). Strict JSON — unknown keys crash OpenClaw
+SOUL.md                 → Agent personality (RAILWAY_DOMAIN placeholder replaced at runtime)
+search-middleware.js    → Between OpenClaw and cursor-proxy. Search injection + response deduplication
+search-proxy.js         → DuckDuckGo scraper on port 9876
+router.js               → Public HTTP/WS router
+CLAUDE.md               → Claude Code agent instructions
+AGENTS.md               → This file
+README.md               → Human docs
 ```
 
 ## Constraints
 
-- API keys are env vars in Railway, never in source code
-- `openclaw.json` must be valid JSON (not JSON5)
-- Model identifiers use `provider/model-name` format
-- Gateway must bind to `$PORT` (Railway provides this)
-- Docker image needs `git` package for npm to install openclaw
+- **No secrets in code** — API keys are Railway env vars only
+- **openclaw.json must be strict JSON** — OpenClaw rejects any unknown key with "Config invalid"
+- **Persistent volume** at `/root/.openclaw` — preserves sessions, memory, auth token across deploys
+- **First-boot marker** at `/root/.openclaw/.initialized` — onboard runs only once unless `FORCE_REINIT=1`
+- **Gateway binds to localhost:18789** — cannot be changed, router.js proxies from public $PORT
+- **Cursor agent is sandboxed** — cannot make outbound HTTP, all web search is handled by middleware
+
+## Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `CURSOR_API_KEY` | Yes | Cursor subscription API key |
+| `TELEGRAM_BOT_TOKEN` | Yes | From Telegram @BotFather |
+| `FORCE_REINIT` | No | Set `1` to re-onboard, then remove |
 
 ## How to Modify
 
-### openclaw.json
-Contains agent definitions and model config. Structure:
-```json
-{
-  "agents": {
-    "defaults": {
-      "model": { "primary": "provider/model-name" }
-    },
-    "agent-name": {
-      "model": { "primary": "provider/model-name" },
-      "systemPrompt": "Instructions for this agent"
-    }
-  }
-}
-```
+### Change LLM model
+Update both:
+1. `entrypoint.sh` → `--custom-model-id "model-name"`
+2. `openclaw.json` → `agents.defaults.model.primary` → `"cursor-proxy/model-name"`
 
-### Dockerfile
-Standard Node.js Docker pattern. If adding system dependencies, add them to the `apt-get install` line. Keep the image slim.
+### Agent personality
+Edit `SOUL.md`. Applied every deploy.
 
-### Adding features
-OpenClaw supports: channels (WhatsApp, Telegram, Discord), tools, memory, media handling. See https://docs.openclaw.ai for full config reference.
+### Search behavior
+Edit `search-middleware.js`:
+- `detectSearchIntent()` — when to search (currently: almost always except greetings)
+- `fetchPage()` — page scraping with 3s/page timeout, 8s total
+- Top 3 results get full page content fetched
+
+### Telegram access control
+Edit `openclaw.json` → `channels.telegram.allowFrom`: `["*"]` for open, or `["user_id"]` for restricted.
+
+## Invalid OpenClaw Config Keys (discovered through trial and error)
+
+These keys do NOT exist and will crash OpenClaw:
+- `gateway.host`, `gateway.rateLimit`
+- `channels.telegram.mode`, `channels.telegram.streaming`, `channels.telegram.dmPolicy` (use with `allowFrom: ["*"]`)
+- `agents.defaults.systemPrompt` (use SOUL.md file)
+- `tools.web.enabled`, `tools.web.provider`, `tools.web.baseUrl`
+- `controlUi.auth`
+- `blockStreamingCoalesce` must be `{}` (not boolean or string)
 
 ## Testing
 
-After any change, push to GitHub. Railway auto-deploys. Check:
-1. Railway Deployments tab for build/runtime logs
-2. Public URL should respond (not 502 Bad Gateway)
-3. Android app should connect and get responses from the agent
+```bash
+docker build -t test . && docker run -d --name test -e CURSOR_API_KEY=fake -e PORT=8080 -p 8080:8080 test
+sleep 15 && docker logs test
+docker stop test && docker rm test && docker rmi test && docker builder prune -f
+```
 
-## Context
+Check logs for "Config invalid" errors before pushing.
 
-Owner's workflow:
-- Lives in Netherlands, needs Dutch→Russian translation and conversation summaries
-- Real-time translation: RTranslator app (on-device, offline)
-- AI summaries: This OpenClaw gateway + Gemini
-- Phone: OnePlus 13 with OpenClaw Android node
+## Known Issues
+
+1. OpenClaw webchat always shows "rate limit reached" — use Telegram instead
+2. Cursor agent can't fetch URLs (sandbox) — middleware handles search
+3. Dashboard channel page shows "Unsupported schema node" — cosmetic bug
+4. Thinking model may duplicate content — middleware deduplicates responses
