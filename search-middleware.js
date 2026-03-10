@@ -1,12 +1,33 @@
 // Middleware between OpenClaw and cursor-api-proxy
 // Intercepts chat completions, detects search intent, injects DuckDuckGo results
 const http = require('http');
+const { chromium } = require('playwright');
 
 const PORT = parseInt(process.env.SEARCH_MIDDLEWARE_PORT || '8766');
 const CURSOR_PROXY_PORT = 8765;
 const SEARCH_PORT = 9876;
 
-const https = require('https');
+// Shared browser instance (lazy-initialized)
+let browserPromise = null;
+
+function getBrowser() {
+  if (!browserPromise) {
+    browserPromise = chromium.launch({
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+    }).then(b => {
+      console.log('[search-middleware] Chromium browser launched');
+      return b;
+    }).catch(e => {
+      console.error('[search-middleware] Failed to launch browser:', e.message);
+      browserPromise = null;
+      return null;
+    });
+  }
+  return browserPromise;
+}
+
+// Pre-launch browser on startup
+getBrowser();
 
 function searchDDG(query) {
   return new Promise((resolve, reject) => {
@@ -20,43 +41,25 @@ function searchDDG(query) {
   });
 }
 
-function fetchPage(url, maxChars = 2000) {
-  return new Promise((resolve) => {
-    // Hard timeout - never hang more than 4 seconds
-    const timer = setTimeout(() => resolve(''), 4000);
+async function fetchPage(url, maxChars = 2000) {
+  const browser = await getBrowser();
+  if (!browser) return '';
 
-    try {
-      const mod = url.startsWith('https') ? https : http;
-      const req = mod.get(url, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Bot/1.0)', 'Accept': 'text/html' },
-        timeout: 3000
-      }, (res) => {
-        if (res.statusCode !== 200) { clearTimeout(timer); return resolve(''); }
-        let data = '';
-        res.on('data', c => {
-          data += c;
-          if (data.length > maxChars * 3) { res.destroy(); }
-        });
-        res.on('end', () => {
-          clearTimeout(timer);
-          let text = data
-            .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-            .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-            .replace(/<[^>]+>/g, ' ')
-            .replace(/&[a-z]+;/gi, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-          resolve(text.substring(0, maxChars));
-        });
-        res.on('error', () => { clearTimeout(timer); resolve(''); });
-      });
-      req.on('error', () => { clearTimeout(timer); resolve(''); });
-      req.on('timeout', () => { clearTimeout(timer); req.destroy(); resolve(''); });
-    } catch(e) {
-      clearTimeout(timer);
-      resolve('');
-    }
-  });
+  let page;
+  try {
+    page = await browser.newPage();
+    page.setDefaultTimeout(6000);
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 6000 });
+    // Brief wait for JS-rendered content
+    await page.waitForTimeout(1500);
+    const text = await page.evaluate(() => document.body?.innerText || '');
+    return text.replace(/\s+/g, ' ').trim().substring(0, maxChars);
+  } catch (e) {
+    console.error(`[search-middleware] Playwright fetch failed for ${url}: ${e.message}`);
+    return '';
+  } finally {
+    if (page) await page.close().catch(() => {});
+  }
 }
 
 // Extract actual user text from OpenClaw's metadata wrapper

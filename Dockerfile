@@ -2,6 +2,9 @@ FROM node:22-slim
 
 RUN apt-get update && apt-get install -y git socat curl netcat-openbsd && rm -rf /var/lib/apt/lists/*
 
+# Install Playwright with Chromium for fetching JS-heavy pages
+RUN cd /opt && npm install playwright@latest && npx playwright install --with-deps chromium
+
 # Install Cursor CLI (agent)
 RUN curl https://cursor.com/install -fsS | bash
 ENV PATH="/root/.local/bin:${PATH}"
