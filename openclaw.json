@@ -13,7 +13,8 @@
       "enabled": true,
       "dmPolicy": "open",
       "allowFrom": ["*"],
-      "groupPolicy": "open"
+      "groupPolicy": "open",
+      "blockStreaming": true
     }
   },
   "agents": {

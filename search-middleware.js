@@ -21,17 +21,19 @@ function searchDDG(query) {
 // Extract actual user text from OpenClaw's metadata wrapper
 function extractUserText(content) {
   if (!content) return '';
-  // OpenClaw wraps messages like:
-  // "Conversation info (untrusted metadata):\n```json\n{...}\n```\n\nActual message here"
-  // Or sometimes the actual text is after the JSON block
-  const jsonBlockEnd = content.indexOf('```\n\n');
-  if (jsonBlockEnd !== -1) {
-    return content.substring(jsonBlockEnd + 5).trim();
+  // OpenClaw wraps messages with multiple metadata blocks:
+  // "Conversation info (untrusted metadata):\n```json\n{...}\n```\n\nSender (untrusted metadata):\n```json\n{...}\n```\nActual message"
+  // Find the LAST closing ``` and take everything after it
+  let lastIdx = -1;
+  let searchFrom = 0;
+  while (true) {
+    const idx = content.indexOf('```', searchFrom);
+    if (idx === -1) break;
+    lastIdx = idx;
+    searchFrom = idx + 3;
   }
-  // Also try triple backtick without double newline
-  const altEnd = content.lastIndexOf('```');
-  if (altEnd > 10) {
-    return content.substring(altEnd + 3).trim();
+  if (lastIdx > 10) {
+    return content.substring(lastIdx + 3).trim();
   }
   return content;
 }
