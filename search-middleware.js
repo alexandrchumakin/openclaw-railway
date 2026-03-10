@@ -46,6 +46,8 @@ async function handleRequest(req, res) {
   let body = '';
   req.on('data', c => body += c);
   req.on('end', async () => {
+    console.log(`[search-middleware] ${req.method} ${req.url} (${body.length} bytes)`);
+
     // Only intercept chat completions POST
     if (req.method === 'POST' && req.url.includes('/chat/completions')) {
       try {
@@ -54,7 +56,9 @@ async function handleRequest(req, res) {
         const lastMsg = messages[messages.length - 1];
 
         if (lastMsg && lastMsg.role === 'user') {
-          const content = typeof lastMsg.content === 'string' ? lastMsg.content : '';
+          const content = typeof lastMsg.content === 'string' ? lastMsg.content :
+            (Array.isArray(lastMsg.content) ? lastMsg.content.map(c => c.text || '').join(' ') : '');
+          console.log(`[search-middleware] Last user message: "${content.substring(0, 100)}"`);
           const query = detectSearchIntent(content);
 
           if (query) {
