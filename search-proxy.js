@@ -34,8 +34,8 @@ async function fetchPageWithBrowser(url, maxChars = 6000) {
   let page;
   try {
     page = await browser.newPage();
-    page.setDefaultTimeout(8000);
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 8000 });
+    page.setDefaultTimeout(15000);
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
     // Wait for JS-rendered content
     await page.waitForTimeout(2000);
     const text = await page.evaluate(() => document.body?.innerText || '');
