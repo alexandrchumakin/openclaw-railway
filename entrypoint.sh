@@ -73,7 +73,7 @@ if (cfg.models?.providers?.['cursor-proxy']) {
     cfg.models.providers['cursor-proxy'].models[0].maxTokens = 16384;
   }
 }
-cfg.tools = { profile: 'none' };
+cfg.tools = { profile: 'minimal' };
 fs.writeFileSync('/root/.openclaw/openclaw.json', JSON.stringify(cfg, null, 2));
 console.log('Provider baseUrl:', cfg.models?.providers?.['cursor-proxy']?.baseUrl);
 "
