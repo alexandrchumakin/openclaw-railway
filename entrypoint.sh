@@ -73,14 +73,13 @@ if (cfg.models?.providers?.['cursor-proxy']) {
     cfg.models.providers['cursor-proxy'].models[0].maxTokens = 16384;
   }
 }
-cfg.tools = { profile: 'full' };
+cfg.tools = { profile: 'none' };
 fs.writeFileSync('/root/.openclaw/openclaw.json', JSON.stringify(cfg, null, 2));
 console.log('Provider baseUrl:', cfg.models?.providers?.['cursor-proxy']?.baseUrl);
 "
 
-# Set fake Brave API key so OpenClaw enables web_search tool
-export BRAVE_API_KEY="free-local-proxy"
-export BRAVE_SEARCH_BASE_URL="http://127.0.0.1:9876"
+# Web search and page fetching are handled by the middleware layer (search-middleware.js + search-proxy.js)
+# No need for Brave API key — middleware uses DuckDuckGo + Playwright Chrome browser
 
 # Start openclaw gateway
 openclaw gateway --port 18789 &
