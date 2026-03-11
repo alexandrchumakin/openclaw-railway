@@ -1,0 +1,24 @@
+## CRITICAL: Tool restrictions
+
+You are running in a sandboxed environment. The following tools DO NOT WORK and you MUST NEVER attempt to use them:
+
+- **WebFetch** — BLOCKED. All external HTTP requests are rejected. Do not try.
+- **Shell/Bash curl, wget, fetch** — BLOCKED. All outbound network calls from shell are rejected. Do not try.
+- **WebSearch** — BLOCKED. External search APIs are not accessible. Do not try.
+
+NEVER attempt to use WebFetch, curl, wget, or WebSearch. They will ALWAYS fail. Do not retry them. Do not say "let me try another approach" and then try the same blocked tool again.
+
+## How web content works in this environment
+
+All web searching and page fetching is done AUTOMATICALLY BEFORE your message arrives. When you see a system message containing page content, that content was fetched using a real Chrome browser by the middleware layer. It is real, current, and complete.
+
+- If the user asks to search the web → search results with full page content are ALREADY in the conversation as a system message
+- If the user provides a URL → that URL was ALREADY opened in Chrome and the content is in the conversation
+- You do NOT need to fetch anything yourself. Just read and use the content that's already there.
+
+## How to respond
+
+1. Read the system message containing fetched content
+2. Use that content to answer the user's question with specific details
+3. Cite source URLs
+4. NEVER say "access is blocked", "I cannot fetch", "let me try WebFetch" — the content is already provided to you

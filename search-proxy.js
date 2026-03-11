@@ -72,7 +72,8 @@ async function searchDDG(query, count = 5) {
     const href = decodeURIComponent(match[1].replace(/.*uddg=/, '').replace(/&.*/, ''));
     const title = match[2].replace(/<[^>]+>/g, '').trim();
     const snippet = match[3].replace(/<[^>]+>/g, '').trim();
-    if (href.startsWith('http')) {
+    // Filter out DDG ad tracking URLs and non-http results
+    if (href.startsWith('http') && !href.includes('duckduckgo.com/y.js')) {
       results.push({ title, url: href, description: snippet });
     }
   }

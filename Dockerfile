@@ -20,6 +20,10 @@ RUN cd /opt && git clone https://github.com/anyrobert/cursor-api-proxy.git && \
 RUN mkdir -p /root/.openclaw/agents/main/sessions /root/.openclaw/credentials
 RUN chmod 700 /root/.openclaw
 
+# Create agent workspace with rules that forbid web tools (they're sandboxed and always fail)
+RUN mkdir -p /opt/agent-workspace/.cursor/rules
+COPY .cursorrules /opt/agent-workspace/.cursorrules
+
 ENV NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache
 ENV OPENCLAW_NO_RESPAWN=1
 RUN mkdir -p /var/tmp/openclaw-compile-cache

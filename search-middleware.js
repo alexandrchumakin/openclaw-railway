@@ -21,7 +21,7 @@ function searchDDG(query) {
 // Fetch page content via search-proxy's Playwright browser endpoint
 function fetchPage(url, maxChars = 4000) {
   return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(''), 12000);
+    const timer = setTimeout(() => resolve(''), 15000);
     http.get(`http://127.0.0.1:${SEARCH_PORT}/fetch?url=${encodeURIComponent(url)}&maxChars=${maxChars}`, (res) => {
       let data = '';
       res.on('data', c => data += c);
@@ -35,6 +35,12 @@ function fetchPage(url, maxChars = 4000) {
       res.on('error', () => { clearTimeout(timer); resolve(''); });
     }).on('error', () => { clearTimeout(timer); resolve(''); });
   });
+}
+
+// Extract URLs from user text
+function extractUrls(text) {
+  const urlRegex = /https?:\/\/[^\s,)}\]"']+/gi;
+  return (text.match(urlRegex) || []).map(u => u.replace(/[.,;:!?]+$/, ''));
 }
 
 // Extract actual user text from OpenClaw's metadata wrapper
@@ -77,6 +83,46 @@ function detectSearchIntent(text) {
   return text;
 }
 
+// Robust deduplication: detects repeated blocks at any split point
+function deduplicateText(text) {
+  if (!text || text.length < 60) return text;
+
+  // Strategy 1: Find any position where a block of text is immediately repeated
+  // Scan for the earliest repeat: check if text[i..i+len] == text[i+len..i+2*len]
+  for (let blockLen = Math.floor(text.length * 0.3); blockLen <= Math.floor(text.length * 0.55); blockLen++) {
+    const block = text.substring(0, blockLen);
+    const rest = text.substring(blockLen);
+    // Check if the rest starts with a significant portion of the block
+    const checkLen = Math.min(100, Math.floor(block.length * 0.4));
+    if (checkLen > 20 && rest.trimStart().startsWith(block.substring(0, checkLen).trimStart())) {
+      console.log(`[search-middleware] Dedup: block repeat found at char ${blockLen}`);
+      return text.substring(0, blockLen).trim();
+    }
+  }
+
+  // Strategy 2: Split into sentences/segments, remove consecutive and near-consecutive duplicates
+  // Use a regex that handles missing spaces after punctuation too (e.g., "sentence.Next sentence")
+  const segments = text.split(/(?<=[.!?。\n])(?:\s+|(?=[A-ZА-ЯЁ]))/);
+  if (segments.length > 2) {
+    const unique = [segments[0]];
+    const seen = new Set([segments[0].trim()]);
+    for (let i = 1; i < segments.length; i++) {
+      const s = segments[i].trim();
+      if (!s) continue;
+      if (!seen.has(s)) {
+        unique.push(segments[i]);
+        seen.add(s);
+      }
+    }
+    if (unique.length < segments.length * 0.85) {
+      console.log(`[search-middleware] Dedup: removed ${segments.length - unique.length} duplicate sentences`);
+      return unique.join(' ');
+    }
+  }
+
+  return text;
+}
+
 async function handleRequest(req, res) {
   let body = '';
   req.on('data', c => body += c);
@@ -100,43 +146,68 @@ async function handleRequest(req, res) {
 
           const query = detectSearchIntent(userText);
 
-          if (query) {
-            console.log(`[search-middleware] Search detected: "${query.substring(0, 100)}"`);
-            try {
-              const results = await searchDDG(query);
-              const webResults = results?.web?.results || [];
-              if (webResults.length > 0) {
-                // Fetch content from ALL results via Playwright (30s total timeout)
-                const enrichedResults = await Promise.race([
-                  Promise.all(webResults.map(async (r) => {
-                    try {
-                      const content = await fetchPage(r.url, 4000);
-                      return { ...r, pageContent: content };
-                    } catch(e) {
-                      return { ...r, pageContent: '' };
-                    }
-                  })),
-                  new Promise(resolve => setTimeout(() => {
-                    console.log('[search-middleware] Page fetch timeout (30s), using snippets only');
-                    resolve(webResults.map(r => ({ ...r, pageContent: '' })));
-                  }, 30000))
-                ]);
+          // Extract URLs mentioned directly by the user
+          const userUrls = extractUrls(userText);
+          if (userUrls.length > 0) {
+            console.log(`[search-middleware] User mentioned URLs: ${userUrls.join(', ')}`);
+          }
 
-                const searchContext = enrichedResults.map((r, i) => {
+          if (query || userUrls.length > 0) {
+            if (query) console.log(`[search-middleware] Search detected: "${query.substring(0, 100)}"`);
+            try {
+              // Fetch user-mentioned URLs directly via Playwright (in parallel with search)
+              const [directResults, searchResponse] = await Promise.all([
+                userUrls.length > 0 ? Promise.all(userUrls.map(async (url) => {
+                  console.log(`[search-middleware] Directly fetching user URL: ${url}`);
+                  const content = await fetchPage(url, 6000);
+                  return { title: `Page: ${url}`, url, description: 'Directly fetched from user-provided URL', pageContent: content };
+                })) : Promise.resolve([]),
+                query ? searchDDG(query) : Promise.resolve({ web: { results: [] } }),
+              ]);
+
+              const webResults = searchResponse?.web?.results || [];
+
+              // Fetch content from search results via Playwright (skip URLs already fetched directly)
+              const fetchedUrls = new Set(userUrls);
+              const searchToFetch = webResults.filter(r => !fetchedUrls.has(r.url));
+
+              const enrichedSearch = await Promise.race([
+                Promise.all(searchToFetch.map(async (r) => {
+                  try {
+                    const content = await fetchPage(r.url, 4000);
+                    return { ...r, pageContent: content };
+                  } catch(e) {
+                    return { ...r, pageContent: '' };
+                  }
+                })),
+                new Promise(resolve => setTimeout(() => {
+                  console.log('[search-middleware] Page fetch timeout (30s), using snippets only');
+                  resolve(searchToFetch.map(r => ({ ...r, pageContent: '' })));
+                }, 30000))
+              ]);
+
+              const allResults = [...directResults, ...enrichedSearch];
+
+              if (allResults.length > 0) {
+                const searchContext = allResults.map((r, i) => {
                   let entry = `[${i+1}] ${r.title}\n    URL: ${r.url}\n    ${r.description}`;
                   if (r.pageContent) {
-                    entry += `\n    Page content:\n    ${r.pageContent.substring(0, 4000)}`;
+                    entry += `\n    Page content (fetched via Chrome browser):\n    ${r.pageContent}`;
                   }
                   return entry;
                 }).join('\n\n');
 
+                const label = userUrls.length > 0
+                  ? `Fetched pages and search results (via real Chrome browser)`
+                  : `Web search results for "${query.substring(0, 80)}" (with page content from browser)`;
+
                 messages.splice(messages.length - 1, 0, {
                   role: 'system',
-                  content: `Web search results for "${query.substring(0, 80)}" (with full page content from browser):\n\n${searchContext}\n\nUse these search results AND the page content to give a detailed, helpful answer. Include specific details like prices, product names, and links. Always cite source URLs.`
+                  content: `${label}:\n\n${searchContext}\n\nIMPORTANT: All pages above were fetched successfully using a real Chrome browser. Do NOT say you cannot access these sites. Use the page content to answer with specific details like prices, product names, and links. Always cite source URLs.`
                 });
                 payload.messages = messages;
                 body = JSON.stringify(payload);
-                console.log(`[search-middleware] Injected ${webResults.length} results (${enrichedResults.filter(r => r.pageContent).length} with page content)`);
+                console.log(`[search-middleware] Injected ${allResults.length} results (${allResults.filter(r => r.pageContent).length} with page content)`);
               }
             } catch(e) {
               console.error('[search-middleware] Search error:', e.message);
@@ -171,7 +242,6 @@ async function handleRequest(req, res) {
       proxyRes.on('end', () => {
         try {
           if (proxyRes.headers['content-type']?.includes('text/event-stream')) {
-            // Parse SSE events, collect content and track where duplicate starts
             const lines = responseData.split('\n');
             let fullContent = '';
             let events = [];
@@ -188,47 +258,42 @@ async function handleRequest(req, res) {
               }
             }
 
-            // Detect duplicate: if second half repeats first half
-            let cutAfterChars = fullContent.length;
-            if (fullContent.length > 100) {
-              const half = Math.floor(fullContent.length / 2);
-              const first = fullContent.substring(0, half);
-              const second = fullContent.substring(half);
-              if (first.length > 50 && second.startsWith(first.substring(0, Math.min(200, first.length)))) {
-                cutAfterChars = half;
-                console.log(`[search-middleware] Deduplicated SSE (${fullContent.length} -> ${cutAfterChars} chars)`);
+            const deduped = deduplicateText(fullContent);
+            if (deduped.length < fullContent.length) {
+              console.log(`[search-middleware] Deduplicated SSE (${fullContent.length} -> ${deduped.length} chars)`);
+              // Rebuild as single-chunk SSE with deduped content
+              const sseChunk = JSON.stringify({
+                choices: [{ index: 0, delta: { content: deduped }, finish_reason: 'stop' }]
+              });
+              const output = `data: ${sseChunk}\n\ndata: [DONE]\n\n`;
+              const headers = { ...proxyRes.headers };
+              delete headers['content-length'];
+              headers['transfer-encoding'] = 'chunked';
+              res.writeHead(proxyRes.statusCode, headers);
+              res.end(output);
+            } else {
+              // No dedup needed, pass through original events
+              let output = '';
+              for (const evt of events) {
+                output += evt.line + '\n\n';
               }
+              output += 'data: [DONE]\n\n';
+              const headers = { ...proxyRes.headers };
+              delete headers['content-length'];
+              headers['transfer-encoding'] = 'chunked';
+              res.writeHead(proxyRes.statusCode, headers);
+              res.end(output);
             }
-
-            // Rebuild SSE stream, cutting off at dedup point
-            let charsSent = 0;
-            let output = '';
-            for (const evt of events) {
-              if (charsSent >= cutAfterChars && evt.content) break;
-              output += evt.line + '\n\n';
-              charsSent += evt.content.length;
-            }
-            output += 'data: [DONE]\n\n';
-
-            const headers = { ...proxyRes.headers };
-            delete headers['content-length'];
-            headers['transfer-encoding'] = 'chunked';
-            res.writeHead(proxyRes.statusCode, headers);
-            res.end(output);
           } else {
             // Non-streaming JSON response
             try {
               const json = JSON.parse(responseData);
               let content = json.choices?.[0]?.message?.content || '';
-              if (content.length > 100) {
-                const half = Math.floor(content.length / 2);
-                const first = content.substring(0, half);
-                const second = content.substring(half);
-                if (first.length > 50 && second.startsWith(first.substring(0, Math.min(200, first.length)))) {
-                  console.log(`[search-middleware] Deduplicated JSON response`);
-                  json.choices[0].message.content = first;
-                  responseData = JSON.stringify(json);
-                }
+              const deduped = deduplicateText(content);
+              if (deduped.length < content.length) {
+                console.log(`[search-middleware] Deduplicated JSON (${content.length} -> ${deduped.length} chars)`);
+                json.choices[0].message.content = deduped;
+                responseData = JSON.stringify(json);
               }
             } catch(e) {}
             res.writeHead(proxyRes.statusCode, proxyRes.headers);

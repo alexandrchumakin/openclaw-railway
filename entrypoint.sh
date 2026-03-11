@@ -8,8 +8,12 @@ node /opt/search-proxy.js &
 echo "Search proxy started on port 9876"
 
 # Start cursor-api-proxy in background (port 8765)
+# Use custom workspace with .cursorrules to forbid WebFetch/Shell/WebSearch (they're sandboxed)
 cd /opt/cursor-api-proxy
-CURSOR_API_KEY="${CURSOR_API_KEY}" npm start &
+CURSOR_API_KEY="${CURSOR_API_KEY}" \
+  CURSOR_BRIDGE_WORKSPACE="/opt/agent-workspace" \
+  CURSOR_BRIDGE_CHAT_ONLY_WORKSPACE="false" \
+  npm start &
 CURSOR_PID=$!
 sleep 3
 echo "Cursor API proxy started on port 8765"
