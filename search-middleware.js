@@ -1,33 +1,10 @@
 // Middleware between OpenClaw and cursor-api-proxy
-// Intercepts chat completions, detects search intent, injects DuckDuckGo results
+// Intercepts chat completions, detects search intent, injects DuckDuckGo results with page content
 const http = require('http');
-const { chromium } = require('playwright');
 
 const PORT = parseInt(process.env.SEARCH_MIDDLEWARE_PORT || '8766');
 const CURSOR_PROXY_PORT = 8765;
 const SEARCH_PORT = 9876;
-
-// Shared browser instance (lazy-initialized)
-let browserPromise = null;
-
-function getBrowser() {
-  if (!browserPromise) {
-    browserPromise = chromium.launch({
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-    }).then(b => {
-      console.log('[search-middleware] Chromium browser launched');
-      return b;
-    }).catch(e => {
-      console.error('[search-middleware] Failed to launch browser:', e.message);
-      browserPromise = null;
-      return null;
-    });
-  }
-  return browserPromise;
-}
-
-// Pre-launch browser on startup
-getBrowser();
 
 function searchDDG(query) {
   return new Promise((resolve, reject) => {
@@ -41,25 +18,23 @@ function searchDDG(query) {
   });
 }
 
-async function fetchPage(url, maxChars = 2000) {
-  const browser = await getBrowser();
-  if (!browser) return '';
-
-  let page;
-  try {
-    page = await browser.newPage();
-    page.setDefaultTimeout(6000);
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 6000 });
-    // Brief wait for JS-rendered content
-    await page.waitForTimeout(1500);
-    const text = await page.evaluate(() => document.body?.innerText || '');
-    return text.replace(/\s+/g, ' ').trim().substring(0, maxChars);
-  } catch (e) {
-    console.error(`[search-middleware] Playwright fetch failed for ${url}: ${e.message}`);
-    return '';
-  } finally {
-    if (page) await page.close().catch(() => {});
-  }
+// Fetch page content via search-proxy's Playwright browser endpoint
+function fetchPage(url, maxChars = 4000) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(''), 12000);
+    http.get(`http://127.0.0.1:${SEARCH_PORT}/fetch?url=${encodeURIComponent(url)}&maxChars=${maxChars}`, (res) => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        clearTimeout(timer);
+        try {
+          const json = JSON.parse(data);
+          resolve(json.content || '');
+        } catch(e) { resolve(''); }
+      });
+      res.on('error', () => { clearTimeout(timer); resolve(''); });
+    }).on('error', () => { clearTimeout(timer); resolve(''); });
+  });
 }
 
 // Extract actual user text from OpenClaw's metadata wrapper
@@ -131,40 +106,33 @@ async function handleRequest(req, res) {
               const results = await searchDDG(query);
               const webResults = results?.web?.results || [];
               if (webResults.length > 0) {
-                // Fetch content from top 3 pages (with 8s total timeout)
+                // Fetch content from ALL results via Playwright (30s total timeout)
                 const enrichedResults = await Promise.race([
-                  Promise.all(webResults.slice(0, 3).map(async (r) => {
+                  Promise.all(webResults.map(async (r) => {
                     try {
-                      const content = await fetchPage(r.url, 2000);
+                      const content = await fetchPage(r.url, 4000);
                       return { ...r, pageContent: content };
                     } catch(e) {
                       return { ...r, pageContent: '' };
                     }
                   })),
                   new Promise(resolve => setTimeout(() => {
-                    console.log('[search-middleware] Page fetch timeout (8s), using snippets only');
-                    resolve(webResults.slice(0, 3).map(r => ({ ...r, pageContent: '' })));
-                  }, 8000))
+                    console.log('[search-middleware] Page fetch timeout (30s), using snippets only');
+                    resolve(webResults.map(r => ({ ...r, pageContent: '' })));
+                  }, 30000))
                 ]);
 
                 const searchContext = enrichedResults.map((r, i) => {
                   let entry = `[${i+1}] ${r.title}\n    URL: ${r.url}\n    ${r.description}`;
                   if (r.pageContent) {
-                    entry += `\n    Page content:\n    ${r.pageContent.substring(0, 2000)}`;
+                    entry += `\n    Page content:\n    ${r.pageContent.substring(0, 4000)}`;
                   }
                   return entry;
                 }).join('\n\n');
 
-                // Add remaining results without page content
-                const remaining = webResults.slice(3).map((r, i) =>
-                  `[${i+4}] ${r.title}\n    URL: ${r.url}\n    ${r.description}`
-                ).join('\n\n');
-
-                const fullContext = remaining ? searchContext + '\n\n' + remaining : searchContext;
-
                 messages.splice(messages.length - 1, 0, {
                   role: 'system',
-                  content: `Web search results for "${query.substring(0, 80)}" (with page content from top results):\n\n${fullContext}\n\nUse these search results AND the page content to give a detailed, helpful answer. Include specific details like prices, product names, and links. Always cite source URLs.`
+                  content: `Web search results for "${query.substring(0, 80)}" (with full page content from browser):\n\n${searchContext}\n\nUse these search results AND the page content to give a detailed, helpful answer. Include specific details like prices, product names, and links. Always cite source URLs.`
                 });
                 payload.messages = messages;
                 body = JSON.stringify(payload);

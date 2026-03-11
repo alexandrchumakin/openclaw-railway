@@ -121,8 +121,8 @@ function forwardToOpenclaw(req, res, body) {
 }
 
 const server = http.createServer((req, res) => {
-  // Search proxy direct access
-  if (req.url.startsWith('/search')) {
+  // Search proxy direct access (search + fetch)
+  if (req.url.startsWith('/search') || req.url.startsWith('/fetch')) {
     const proxyReq = http.request({
       hostname: '127.0.0.1',
       port: SEARCH_PORT,
