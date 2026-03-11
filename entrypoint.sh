@@ -13,6 +13,7 @@ cd /opt/cursor-api-proxy
 CURSOR_API_KEY="${CURSOR_API_KEY}" \
   CURSOR_BRIDGE_WORKSPACE="/opt/agent-workspace" \
   CURSOR_BRIDGE_CHAT_ONLY_WORKSPACE="false" \
+  CURSOR_BRIDGE_FORCE="true" \
   npm start &
 CURSOR_PID=$!
 sleep 3
