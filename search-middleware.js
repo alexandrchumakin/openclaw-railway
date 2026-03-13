@@ -6,9 +6,15 @@ const PORT = parseInt(process.env.SEARCH_MIDDLEWARE_PORT || '8766');
 const CURSOR_PROXY_PORT = 8765;
 const SEARCH_PORT = 9876;
 
+// Payload size limits to avoid E2BIG spawn errors in cursor-api-proxy
+const MAX_PAGE_CHARS_SEARCH = 2000;   // per search result page
+const MAX_PAGE_CHARS_DIRECT = 3000;   // per user-provided URL
+const MAX_SEARCH_CONTEXT = 20000;     // total injected search context chars
+const MAX_PAYLOAD_BYTES = 120000;     // total JSON payload forwarded to proxy
+
 function searchDDG(query) {
   return new Promise((resolve, reject) => {
-    http.get(`http://127.0.0.1:${SEARCH_PORT}/search?q=${encodeURIComponent(query)}&count=5`, (res) => {
+    http.get(`http://127.0.0.1:${SEARCH_PORT}/search?q=${encodeURIComponent(query)}&count=3`, (res) => {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => {
@@ -157,9 +163,9 @@ async function handleRequest(req, res) {
             try {
               // Fetch user-mentioned URLs directly via Playwright (in parallel with search)
               const [directResults, searchResponse] = await Promise.all([
-                userUrls.length > 0 ? Promise.all(userUrls.map(async (url) => {
+                userUrls.length > 0 ? Promise.all(userUrls.slice(0, 3).map(async (url) => {
                   console.log(`[search-middleware] Directly fetching user URL: ${url}`);
-                  const content = await fetchPage(url, 6000);
+                  const content = await fetchPage(url, MAX_PAGE_CHARS_DIRECT);
                   return { title: `Page: ${url}`, url, description: 'Directly fetched from user-provided URL', pageContent: content };
                 })) : Promise.resolve([]),
                 query ? searchDDG(query) : Promise.resolve({ web: { results: [] } }),
@@ -172,9 +178,9 @@ async function handleRequest(req, res) {
               const searchToFetch = webResults.filter(r => !fetchedUrls.has(r.url));
 
               const enrichedSearch = await Promise.race([
-                Promise.all(searchToFetch.map(async (r) => {
+                Promise.all(searchToFetch.slice(0, 3).map(async (r) => {
                   try {
-                    const content = await fetchPage(r.url, 4000);
+                    const content = await fetchPage(r.url, MAX_PAGE_CHARS_SEARCH);
                     return { ...r, pageContent: content };
                   } catch(e) {
                     return { ...r, pageContent: '' };
@@ -189,13 +195,22 @@ async function handleRequest(req, res) {
               const allResults = [...directResults, ...enrichedSearch];
 
               if (allResults.length > 0) {
-                const searchContext = allResults.map((r, i) => {
+                // Build search context with total size cap
+                let searchContext = '';
+                let usedResults = 0;
+                for (let i = 0; i < allResults.length; i++) {
+                  const r = allResults[i];
                   let entry = `[${i+1}] ${r.title}\n    URL: ${r.url}\n    ${r.description}`;
                   if (r.pageContent) {
                     entry += `\n    Page content (fetched via Chrome browser):\n    ${r.pageContent}`;
                   }
-                  return entry;
-                }).join('\n\n');
+                  if (searchContext.length + entry.length > MAX_SEARCH_CONTEXT && usedResults > 0) {
+                    console.log(`[search-middleware] Search context capped at ${usedResults} results (${searchContext.length} chars)`);
+                    break;
+                  }
+                  searchContext += (usedResults > 0 ? '\n\n' : '') + entry;
+                  usedResults++;
+                }
 
                 const label = userUrls.length > 0
                   ? `Fetched pages and search results (via real Chrome browser)`
@@ -207,7 +222,7 @@ async function handleRequest(req, res) {
                 });
                 payload.messages = messages;
                 body = JSON.stringify(payload);
-                console.log(`[search-middleware] Injected ${allResults.length} results (${allResults.filter(r => r.pageContent).length} with page content)`);
+                console.log(`[search-middleware] Injected ${usedResults} results (${allResults.filter(r => r.pageContent).length} with page content), context: ${searchContext.length} chars`);
               }
             } catch(e) {
               console.error('[search-middleware] Search error:', e.message);
@@ -218,6 +233,32 @@ async function handleRequest(req, res) {
         }
       } catch(e) {
         console.error('[search-middleware] Parse error:', e.message);
+      }
+    }
+
+    // Trim payload if too large to avoid E2BIG spawn error in cursor-api-proxy
+    if (body.length > MAX_PAYLOAD_BYTES && req.method === 'POST' && req.url.includes('/chat/completions')) {
+      try {
+        const payload = JSON.parse(body);
+        const messages = payload.messages || [];
+        // Keep first message (system prompt) and last 4 messages (recent context),
+        // trim from the middle (older conversation history)
+        while (messages.length > 5 && JSON.stringify(payload).length > MAX_PAYLOAD_BYTES) {
+          messages.splice(1, 1);
+        }
+        // If still too large, truncate content of remaining messages
+        if (JSON.stringify(payload).length > MAX_PAYLOAD_BYTES) {
+          for (let i = 0; i < messages.length - 1; i++) {
+            if (typeof messages[i].content === 'string' && messages[i].content.length > 2000) {
+              messages[i].content = messages[i].content.substring(0, 2000) + '\n[...truncated]';
+            }
+          }
+        }
+        payload.messages = messages;
+        body = JSON.stringify(payload);
+        console.log(`[search-middleware] Trimmed payload to ${body.length} bytes (${messages.length} messages)`);
+      } catch(e) {
+        console.error('[search-middleware] Payload trim error:', e.message);
       }
     }
 

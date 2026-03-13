@@ -158,6 +158,7 @@ If the agent says "WebFetch is blocked" or tries curl:
 4. **Response deduplication** — Cursor's thinking model sometimes duplicates content. The middleware handles this with block-repeat detection and sentence-level dedup, but edge cases may still occur.
 5. **Some sites block even Playwright** — Sites with Captcha/WAF (e.g., Amazon) may return empty content even from headless Chrome. The middleware returns whatever it can get.
 6. **Playwright page timeout** — Some slow sites may exceed the 15s per-page timeout. Check logs for `Playwright fetch failed`.
+7. **E2BIG spawn error** — If conversation + search context exceeds ~120KB, cursor-api-proxy's `spawn` fails. The middleware auto-trims payload by dropping older messages and truncating content. Check for `Trimmed payload` in logs.
 
 ## Use Case Context
 
