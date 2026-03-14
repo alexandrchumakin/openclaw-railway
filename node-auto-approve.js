@@ -1,11 +1,18 @@
-// Auto-approves pending node pairing requests every 5 seconds.
-// Uses OpenClaw's own ws module to connect to the gateway as a local operator.
+// Auto-approves pending node pairing requests.
+// Follows the full OpenClaw gateway WebSocket protocol:
+//   1. Connect to ws://127.0.0.1:18789/
+//   2. Receive connect.challenge event
+//   3. Send connect request (operator role, token auth, no device identity)
+//   4. Receive hello-ok
+//   5. Send node.pair.list, approve any pending nodes
+// Requires dangerouslyDisableDeviceAuth: true in gateway config (skips device identity for operator).
 const WebSocket = require('/usr/local/lib/node_modules/openclaw/node_modules/ws');
+const crypto = require('crypto');
 const fs = require('fs');
 
 const GATEWAY_PORT = 18789;
-const POLL_INTERVAL = 5000;
-const MAX_RUNTIME = 10 * 60 * 1000; // run for 10 minutes then exit
+const POLL_INTERVAL = 10000;
+const MAX_RUNTIME = 15 * 60 * 1000; // 15 minutes
 
 function getToken() {
   try {
@@ -14,68 +21,140 @@ function getToken() {
   } catch { return ''; }
 }
 
+function uuid() { return crypto.randomUUID(); }
+
 function checkAndApprove() {
   const token = getToken();
-  const url = `ws://127.0.0.1:${GATEWAY_PORT}/?token=${encodeURIComponent(token)}&role=operator`;
+  if (!token) { return; }
 
-  const ws = new WebSocket(url, { handshakeTimeout: 5000 });
+  const url = `ws://127.0.0.1:${GATEWAY_PORT}/`;
+  const ws = new WebSocket(url, { handshakeTimeout: 5000, maxPayload: 25 * 1024 * 1024 });
   let done = false;
+  let connected = false;
 
   const cleanup = () => { if (!done) { done = true; try { ws.close(); } catch {} } };
-  setTimeout(cleanup, 8000);
-
-  ws.on('open', () => {
-    ws.send(JSON.stringify({ method: 'node.pair.list', id: 1 }));
-  });
+  setTimeout(cleanup, 12000);
 
   ws.on('message', (raw) => {
     try {
       const msg = JSON.parse(raw.toString());
 
-      if (msg.id === 1) {
-        const pending = [];
-        const result = msg.result || {};
+      // Step 2: Receive connect.challenge, respond with connect request
+      if (msg.type === 'event' && msg.event === 'connect.challenge') {
+        const nonce = msg.payload?.nonce;
+        const connectReq = {
+          type: 'req',
+          id: uuid(),
+          method: 'connect',
+          params: {
+            minProtocol: 3,
+            maxProtocol: 3,
+            client: {
+              id: 'auto-approve-daemon',
+              version: '1.0.0',
+              platform: 'linux',
+              mode: 'operator'
+            },
+            role: 'operator',
+            scopes: ['operator.read', 'operator.write'],
+            caps: [],
+            commands: [],
+            permissions: {},
+            locale: 'en-US',
+            userAgent: 'auto-approve/1.0',
+            auth: { token }
+            // No device identity — relies on dangerouslyDisableDeviceAuth + localhost
+          }
+        };
+        ws.send(JSON.stringify(connectReq));
+        return;
+      }
 
-        // Handle various response shapes
-        const candidates = result.pending || result.nodes || result.requests || [];
-        if (Array.isArray(candidates)) {
-          candidates.forEach(n => {
-            if (n.status === 'pending' || n.state === 'pending' || (!n.paired && !n.approved)) {
-              pending.push(n);
-            }
-          });
+      // Step 4: Receive hello-ok, then list pending nodes
+      if (msg.type === 'res' && msg.ok && msg.payload?.type === 'hello-ok') {
+        connected = true;
+        // List pending nodes
+        ws.send(JSON.stringify({ type: 'req', id: 'list-1', method: 'node.pair.list', params: {} }));
+        return;
+      }
+
+      // Connection rejected
+      if (msg.type === 'res' && !msg.ok) {
+        if (!connected) {
+          // Connect failed — don't spam logs, just close
+          cleanup();
+          return;
         }
+      }
+
+      // Step 5: Handle node.pair.list response
+      if (msg.type === 'res' && msg.id === 'list-1') {
+        if (!msg.ok) {
+          cleanup();
+          return;
+        }
+        const result = msg.payload || {};
+        const allNodes = result.pending || result.nodes || result.requests || [];
+        const pending = Array.isArray(allNodes)
+          ? allNodes.filter(n => n.status === 'pending' || n.state === 'pending')
+          : [];
 
         if (pending.length > 0) {
           console.log(`[auto-approve] Found ${pending.length} pending node(s), approving...`);
           pending.forEach((p, i) => {
             const rid = p.requestId || p.id || p.nodeId;
             console.log(`[auto-approve] Approving node: ${rid}`);
-            ws.send(JSON.stringify({ method: 'node.pair.approve', id: 100 + i, params: { requestId: rid } }));
+            ws.send(JSON.stringify({
+              type: 'req',
+              id: `approve-${i}`,
+              method: 'node.pair.approve',
+              params: { requestId: rid }
+            }));
           });
+          setTimeout(cleanup, 3000);
+        } else {
+          cleanup();
         }
-        // Close after a short delay to receive approve responses
-        setTimeout(cleanup, 2000);
+        return;
       }
 
-      if (msg.id >= 100) {
-        const ok = !msg.error;
-        console.log(`[auto-approve] Approve result: ${ok ? 'SUCCESS' : 'FAILED'} ${msg.error?.message || ''}`);
+      // Approve responses
+      if (msg.type === 'res' && typeof msg.id === 'string' && msg.id.startsWith('approve-')) {
+        console.log(`[auto-approve] ${msg.ok ? 'SUCCESS' : 'FAILED'}: ${msg.error?.message || 'approved'}`);
       }
+
+      // Also listen for real-time pairing events
+      if (msg.type === 'event' && msg.event === 'node.pair.requested') {
+        const rid = msg.payload?.requestId || msg.payload?.id;
+        if (rid) {
+          console.log(`[auto-approve] Real-time pairing request detected: ${rid}`);
+          ws.send(JSON.stringify({
+            type: 'req',
+            id: `approve-rt-${rid}`,
+            method: 'node.pair.approve',
+            params: { requestId: rid }
+          }));
+        }
+      }
+
     } catch (e) {
-      console.error('[auto-approve] Parse error:', e.message);
+      // ignore parse errors
     }
   });
 
-  ws.on('error', () => {}); // Silently ignore connection errors
+  ws.on('error', () => {});
   ws.on('close', () => { done = true; });
 }
 
-console.log('[auto-approve] Node auto-approve daemon started (polling every 5s for 10min)');
-checkAndApprove();
-const interval = setInterval(checkAndApprove, POLL_INTERVAL);
+// Wait 5 seconds for gateway to be fully ready, then start polling
+console.log('[auto-approve] Starting in 5s...');
 setTimeout(() => {
-  clearInterval(interval);
-  console.log('[auto-approve] Max runtime reached, exiting');
-  process.exit(0);
-}, MAX_RUNTIME);
+  console.log('[auto-approve] Node auto-approve daemon started (polling every 10s for 15min)');
+  checkAndApprove();
+  const interval = setInterval(checkAndApprove, POLL_INTERVAL);
+  setTimeout(() => {
+    clearInterval(interval);
+    console.log('[auto-approve] Max runtime reached, exiting');
+    process.exit(0);
+  }, MAX_RUNTIME);
+}, 5000);
