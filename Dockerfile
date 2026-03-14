@@ -32,6 +32,7 @@ COPY search-proxy.js /opt/search-proxy.js
 COPY search-middleware.js /opt/search-middleware.js
 COPY SOUL.md /opt/SOUL.md
 COPY router.js /opt/router.js
+COPY node-auto-approve.js /opt/node-auto-approve.js
 COPY openclaw.json /opt/openclaw-template.json
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

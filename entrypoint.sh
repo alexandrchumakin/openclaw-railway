@@ -103,6 +103,10 @@ echo "OPENCLAW AUTH TOKEN: $TOKEN"
 echo "https://$DOMAIN/chat?session=main&token=$TOKEN"
 echo "============================================"
 
+# Start node auto-approve daemon (approves Android/remote node pairing requests)
+node /opt/node-auto-approve.js &
+echo "Node auto-approve daemon started"
+
 # Start router (handles both OpenClaw + search proxy on $PORT)
 node /opt/router.js &
 
