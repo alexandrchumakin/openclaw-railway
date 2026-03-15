@@ -161,8 +161,11 @@ const server = http.createServer((req, res) => {
   req.pipe(proxyReq);
 });
 
-// WebSocket upgrades -> OpenClaw
+// WebSocket upgrades -> OpenClaw (with debug logging for Android pairing)
 server.on('upgrade', (req, socket, head) => {
+  const ua = req.headers['user-agent'] || '';
+  const isAndroid = ua.includes('okhttp');
+
   const proxy = net.createConnection(OPENCLAW_PORT, '127.0.0.1', () => {
     proxy.write(`${req.method} ${req.url} HTTP/${req.httpVersion}\r\n`);
     for (let i = 0; i < req.rawHeaders.length; i += 2) {
@@ -170,7 +173,28 @@ server.on('upgrade', (req, socket, head) => {
     }
     proxy.write('\r\n');
     if (head.length) proxy.write(head);
-    socket.pipe(proxy).pipe(socket);
+
+    if (isAndroid) {
+      // Log first WS messages for Android to debug pairing
+      let proxyBuf = Buffer.alloc(0);
+      let clientBuf = Buffer.alloc(0);
+      let debugDone = false;
+      const logOnce = (dir, chunk) => {
+        if (debugDone) return;
+        // After HTTP upgrade, WS frames are binary. Log first text frames.
+        const str = chunk.toString('utf8', 0, Math.min(chunk.length, 2000));
+        // Look for JSON in the frame data
+        const jsonMatch = str.match(/\{[^]*\}/);
+        if (jsonMatch) {
+          console.log(`[ws-debug] ${dir}: ${jsonMatch[0].substring(0, 500)}`);
+        }
+      };
+      proxy.on('data', (chunk) => { logOnce('GW->APP', chunk); socket.write(chunk); });
+      socket.on('data', (chunk) => { logOnce('APP->GW', chunk); proxy.write(chunk); });
+      setTimeout(() => { debugDone = true; }, 10000);
+    } else {
+      socket.pipe(proxy).pipe(socket);
+    }
   });
   proxy.on('error', () => socket.end());
   socket.on('error', () => proxy.end());
