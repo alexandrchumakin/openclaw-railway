@@ -7,10 +7,12 @@ const CURSOR_PROXY_PORT = 8765;
 const SEARCH_PORT = 9876;
 
 // Payload size limits to avoid E2BIG spawn errors in cursor-api-proxy
-const MAX_PAGE_CHARS_SEARCH = 2000;   // per search result page
-const MAX_PAGE_CHARS_DIRECT = 3000;   // per user-provided URL
-const MAX_SEARCH_CONTEXT = 20000;     // total injected search context chars
-const MAX_PAYLOAD_BYTES = 120000;     // total JSON payload forwarded to proxy
+// Linux arg+env limit is ~128KB; keep well under to leave room for command line + env vars
+const MAX_PAGE_CHARS_SEARCH = 1500;   // per search result page
+const MAX_PAGE_CHARS_DIRECT = 2500;   // per user-provided URL
+const MAX_SEARCH_CONTEXT = 15000;     // total injected search context chars
+const MAX_PAYLOAD_BYTES = 80000;      // total JSON payload forwarded to proxy
+const MAX_IMAGE_DESCRIBE_CHARS = 200; // placeholder text when image is stripped
 
 function searchDDG(query) {
   return new Promise((resolve, reject) => {
@@ -67,6 +69,39 @@ function extractUserText(content) {
     return content.substring(lastIdx + 3).trim();
   }
   return content;
+}
+
+// Strip base64 images from multimodal messages — Cursor CLI is text-only, images cause E2BIG
+function stripImages(messages) {
+  let stripped = 0;
+  for (const msg of messages) {
+    if (Array.isArray(msg.content)) {
+      msg.content = msg.content.map(part => {
+        if (part.type === 'image_url' || part.type === 'image') {
+          stripped++;
+          return { type: 'text', text: '[Image attached by user — describe what you see if context allows]' };
+        }
+        // Inline base64 in text parts (some clients embed data:image/... in text)
+        if (part.type === 'text' && part.text && part.text.includes('data:image/')) {
+          stripped++;
+          part.text = part.text.replace(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/g, '[base64 image removed]');
+        }
+        return part;
+      });
+      // Flatten to string if only text parts remain
+      const texts = msg.content.filter(p => p.type === 'text').map(p => p.text);
+      if (texts.length === msg.content.length) {
+        msg.content = texts.join('\n');
+      }
+    }
+    // Also check string content for embedded base64
+    if (typeof msg.content === 'string' && msg.content.includes('data:image/')) {
+      stripped++;
+      msg.content = msg.content.replace(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/g, '[base64 image removed]');
+    }
+  }
+  if (stripped > 0) console.log(`[search-middleware] Stripped ${stripped} image(s) from payload`);
+  return messages;
 }
 
 function detectSearchIntent(text) {
@@ -140,6 +175,10 @@ async function handleRequest(req, res) {
       try {
         const payload = JSON.parse(body);
         const messages = payload.messages || [];
+
+        // Strip images early — Cursor CLI can't handle base64, and they cause E2BIG
+        stripImages(messages);
+
         const lastMsg = messages[messages.length - 1];
 
         if (lastMsg && lastMsg.role === 'user') {
@@ -241,19 +280,37 @@ async function handleRequest(req, res) {
       try {
         const payload = JSON.parse(body);
         const messages = payload.messages || [];
-        // Keep first message (system prompt) and last 4 messages (recent context),
-        // trim from the middle (older conversation history)
-        while (messages.length > 5 && JSON.stringify(payload).length > MAX_PAYLOAD_BYTES) {
+
+        // Strip images again in case new ones appeared
+        stripImages(messages);
+
+        // Phase 1: Drop older conversation messages (keep first system + last 3)
+        while (messages.length > 4 && JSON.stringify(payload).length > MAX_PAYLOAD_BYTES) {
           messages.splice(1, 1);
         }
-        // If still too large, truncate content of remaining messages
+        // Phase 2: Truncate long content in all but the last message
         if (JSON.stringify(payload).length > MAX_PAYLOAD_BYTES) {
           for (let i = 0; i < messages.length - 1; i++) {
-            if (typeof messages[i].content === 'string' && messages[i].content.length > 2000) {
-              messages[i].content = messages[i].content.substring(0, 2000) + '\n[...truncated]';
+            if (typeof messages[i].content === 'string' && messages[i].content.length > 1500) {
+              messages[i].content = messages[i].content.substring(0, 1500) + '\n[...truncated]';
             }
           }
         }
+        // Phase 3: If STILL too large, truncate the last message too
+        if (JSON.stringify(payload).length > MAX_PAYLOAD_BYTES) {
+          const last = messages[messages.length - 1];
+          if (typeof last.content === 'string' && last.content.length > 3000) {
+            last.content = last.content.substring(0, 3000) + '\n[...truncated]';
+          }
+        }
+        // Phase 4: Nuclear option — keep only system + last user message
+        if (JSON.stringify(payload).length > MAX_PAYLOAD_BYTES && messages.length > 2) {
+          const first = messages[0];
+          const last = messages[messages.length - 1];
+          messages.length = 0;
+          messages.push(first, last);
+        }
+
         payload.messages = messages;
         body = JSON.stringify(payload);
         console.log(`[search-middleware] Trimmed payload to ${body.length} bytes (${messages.length} messages)`);
