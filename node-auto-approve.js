@@ -67,16 +67,13 @@ function startConnection() {
       }
     }
 
-    const pending = candidates.filter(n =>
-      n.status === 'pending' || n.state === 'pending' ||
-      n.pairingState === 'pending' || n.paired === false
-    );
+    // Items from "pending" array are already pending — no status field to filter on
+    const pending = candidates.filter(n => n._from === 'pending' && n.requestId);
 
     if (pending.length > 0) {
-      console.log(`[auto-approve] Found ${pending.length} pending node(s) in list`);
+      console.log(`[auto-approve] Found ${pending.length} pending device(s) in list`);
       pending.forEach(p => {
-        const rid = p.requestId || p.id || p.nodeId || p.deviceId;
-        if (rid) approveNode(ws, rid);
+        approveNode(ws, p.requestId);
       });
     }
   }
