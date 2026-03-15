@@ -1,6 +1,6 @@
 // Auto-approves pending node pairing requests.
 // Stays connected to the gateway as "openclaw-control-ui" operator and listens for
-// real-time node.pair.requested events. Also polls node.pair.list periodically.
+// real-time node.pair.requested events. Also polls device.pair.list periodically.
 const WebSocket = require('/usr/local/lib/node_modules/openclaw/node_modules/ws');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -19,7 +19,7 @@ function getToken() {
 function approveNode(ws, rid) {
   console.log(`[auto-approve] Approving: ${rid}`);
   ws.send(JSON.stringify({
-    type: 'req', id: `approve-${Date.now()}`, method: 'node.pair.approve',
+    type: 'req', id: `approve-${Date.now()}`, method: 'device.pair.approve',
     params: { requestId: rid },
   }));
 }
@@ -42,14 +42,14 @@ function startConnection() {
     if (ws.readyState !== WebSocket.OPEN) return;
     listCounter++;
     ws.send(JSON.stringify({
-      type: 'req', id: `list-${listCounter}`, method: 'node.pair.list', params: {},
+      type: 'req', id: `list-${listCounter}`, method: 'device.pair.list', params: {},
     }));
   }
 
   function handlePairList(payload) {
     // Log raw response for debugging (first time and every 30th poll)
     if (listCounter <= 2 || listCounter % 30 === 0) {
-      console.log(`[auto-approve] node.pair.list raw: ${JSON.stringify(payload).substring(0, 500)}`);
+      console.log(`[auto-approve] device.pair.list raw: ${JSON.stringify(payload).substring(0, 500)}`);
     }
 
     // Try all possible shapes of the response
@@ -128,7 +128,7 @@ function startConnection() {
       return;
     }
 
-    // node.pair.list responses
+    // device.pair.list responses
     if (msg.type === 'res' && typeof msg.id === 'string' && msg.id.startsWith('list-')) {
       if (msg.ok) {
         handlePairList(msg.payload);
