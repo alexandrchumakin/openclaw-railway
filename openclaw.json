@@ -20,7 +20,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "cursor-proxy/claude-4.6-opus-thinking"
+        "primary": "cursor-proxy/claude-4.6-opus-max-thinking"
       }
     }
   }

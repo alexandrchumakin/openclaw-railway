@@ -39,7 +39,7 @@ if [ ! -f "$FIRST_BOOT_MARKER" ] || [ -n "$FORCE_REINIT" ]; then
     --custom-base-url "http://127.0.0.1:8766/v1" \
     --custom-api-key "unused" \
     --custom-provider-id "cursor-proxy" \
-    --custom-model-id "claude-4.6-opus-thinking" \
+    --custom-model-id "claude-4.6-opus-max-thinking" \
     --custom-compatibility openai \
     --skip-channels \
     --skip-daemon \

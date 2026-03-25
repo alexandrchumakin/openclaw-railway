@@ -13,6 +13,8 @@ const MAX_PAGE_CHARS_DIRECT = 2500;   // per user-provided URL
 const MAX_SEARCH_CONTEXT = 15000;     // total injected search context chars
 const MAX_PAYLOAD_BYTES = 80000;      // total JSON payload forwarded to proxy
 const MAX_IMAGE_DESCRIBE_CHARS = 200; // placeholder text when image is stripped
+const MAX_REQUEST_BODY = 200 * 1024 * 1024; // 200MB — accept large image uploads before stripping
+const RESPONSE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — abort if cursor-api-proxy hangs
 
 function searchDDG(query) {
   return new Promise((resolve, reject) => {
@@ -166,8 +168,24 @@ function deduplicateText(text) {
 
 async function handleRequest(req, res) {
   let body = '';
-  req.on('data', c => body += c);
+  let bodySize = 0;
+  let aborted = false;
+  req.on('data', c => {
+    bodySize += c.length;
+    if (bodySize > MAX_REQUEST_BODY) {
+      if (!aborted) {
+        aborted = true;
+        console.log(`[search-middleware] Request body too large (${(bodySize / 1024 / 1024).toFixed(1)}MB), rejecting`);
+        res.writeHead(413, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'Request body too large (max 200MB)', type: 'payload_too_large' } }));
+        req.destroy();
+      }
+      return;
+    }
+    body += c;
+  });
   req.on('end', async () => {
+    if (aborted) return;
     console.log(`[search-middleware] ${req.method} ${req.url} (${body.length} bytes)`);
 
     // Only intercept chat completions POST
@@ -321,6 +339,7 @@ async function handleRequest(req, res) {
 
     // Forward to cursor-api-proxy, buffer and deduplicate response
     const isChat = req.method === 'POST' && req.url.includes('/chat/completions');
+    let responseTimedOut = false;
     const proxyReq = http.request({
       hostname: '127.0.0.1',
       port: CURSOR_PROXY_PORT,
@@ -328,6 +347,9 @@ async function handleRequest(req, res) {
       method: req.method,
       headers: { ...req.headers, 'content-length': Buffer.byteLength(body), host: `127.0.0.1:${CURSOR_PROXY_PORT}` },
     }, (proxyRes) => {
+      clearTimeout(responseTimer);
+      if (responseTimedOut) return;
+
       if (!isChat) {
         res.writeHead(proxyRes.statusCode, proxyRes.headers);
         proxyRes.pipe(res);
@@ -405,9 +427,25 @@ async function handleRequest(req, res) {
       });
     });
     proxyReq.on('error', (e) => {
+      clearTimeout(responseTimer);
+      if (responseTimedOut) return;
       res.writeHead(502);
       res.end('Proxy error: ' + e.message);
     });
+
+    // 10-minute response timeout — abort if cursor-api-proxy hangs
+    const responseTimer = setTimeout(() => {
+      responseTimedOut = true;
+      proxyReq.destroy();
+      console.log('[search-middleware] Response timeout (10 min), aborting request');
+      if (!res.headersSent) {
+        res.writeHead(504, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          error: { message: 'Response timed out after 10 minutes. Please try again.', type: 'timeout' }
+        }));
+      }
+    }, RESPONSE_TIMEOUT_MS);
+
     proxyReq.end(body);
   });
 }
