@@ -90,7 +90,7 @@ Railway volume mounted at `/root/.openclaw` preserves:
 ### Change the LLM model
 1. Edit `entrypoint.sh` → `--custom-model-id "model-name"`
 2. Edit `openclaw.json` → `agents.defaults.model.primary`
-3. Both must match. Available: `claude-4.6-opus-thinking`, `claude-4.6-opus`, `gpt-5.4-fast`, `claude-sonnet-4`
+3. Both must match. Deploy with `FORCE_REINIT=1` env var, then remove it after deploy succeeds.
 
 ### Modify agent personality
 Edit `SOUL.md`. Changes apply on next deploy without FORCE_REINIT.
