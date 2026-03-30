@@ -234,6 +234,7 @@ async function handleRequest(req, res) {
               const fetchedUrls = new Set(userUrls);
               const searchToFetch = webResults.filter(r => !fetchedUrls.has(r.url));
 
+              let fetchRaceTimer;
               const enrichedSearch = await Promise.race([
                 Promise.all(searchToFetch.slice(0, 3).map(async (r) => {
                   try {
@@ -242,11 +243,13 @@ async function handleRequest(req, res) {
                   } catch(e) {
                     return { ...r, pageContent: '' };
                   }
-                })),
-                new Promise(resolve => setTimeout(() => {
-                  console.log('[search-middleware] Page fetch timeout (30s), using snippets only');
-                  resolve(searchToFetch.map(r => ({ ...r, pageContent: '' })));
-                }, 30000))
+                })).then(results => { clearTimeout(fetchRaceTimer); return results; }),
+                new Promise(resolve => {
+                  fetchRaceTimer = setTimeout(() => {
+                    console.log('[search-middleware] Page fetch timeout (30s), using snippets only');
+                    resolve(searchToFetch.map(r => ({ ...r, pageContent: '' })));
+                  }, 30000);
+                })
               ]);
 
               const allResults = [...directResults, ...enrichedSearch];
@@ -337,7 +340,7 @@ async function handleRequest(req, res) {
       }
     }
 
-    // Forward to cursor-api-proxy, buffer and deduplicate response
+    // Forward to cursor-api-proxy — stream SSE through immediately to prevent client timeouts
     const isChat = req.method === 'POST' && req.url.includes('/chat/completions');
     let responseTimedOut = false;
     const proxyReq = http.request({
@@ -356,81 +359,86 @@ async function handleRequest(req, res) {
         return;
       }
 
-      // Buffer full response to deduplicate
-      let responseData = '';
-      proxyRes.on('data', c => responseData += c);
-      proxyRes.on('end', () => {
-        try {
-          if (proxyRes.headers['content-type']?.includes('text/event-stream')) {
-            const lines = responseData.split('\n');
-            let fullContent = '';
-            let events = [];
-            for (const line of lines) {
-              if (line.startsWith('data: ') && line !== 'data: [DONE]') {
-                try {
-                  const chunk = JSON.parse(line.slice(6));
-                  const delta = chunk.choices?.[0]?.delta?.content || '';
-                  events.push({ line, content: delta });
-                  fullContent += delta;
-                } catch(e) {
-                  events.push({ line, content: '' });
-                }
-              }
-            }
+      const isSSE = proxyRes.headers['content-type']?.includes('text/event-stream');
 
-            const deduped = deduplicateText(fullContent);
-            if (deduped.length < fullContent.length) {
-              console.log(`[search-middleware] Deduplicated SSE (${fullContent.length} -> ${deduped.length} chars)`);
-              // Rebuild as single-chunk SSE with deduped content
-              const sseChunk = JSON.stringify({
-                choices: [{ index: 0, delta: { content: deduped }, finish_reason: 'stop' }]
-              });
-              const output = `data: ${sseChunk}\n\ndata: [DONE]\n\n`;
-              const headers = { ...proxyRes.headers };
-              delete headers['content-length'];
-              headers['transfer-encoding'] = 'chunked';
-              res.writeHead(proxyRes.statusCode, headers);
-              res.end(output);
-            } else {
-              // No dedup needed, pass through original events
-              let output = '';
-              for (const evt of events) {
-                output += evt.line + '\n\n';
-              }
-              output += 'data: [DONE]\n\n';
-              const headers = { ...proxyRes.headers };
-              delete headers['content-length'];
-              headers['transfer-encoding'] = 'chunked';
-              res.writeHead(proxyRes.statusCode, headers);
-              res.end(output);
+      if (isSSE) {
+        // Stream SSE chunks through immediately — prevents webchat timeout
+        // Online block-repeat detection: stop streaming if content starts repeating
+        const headers = { ...proxyRes.headers };
+        delete headers['content-length'];
+        headers['transfer-encoding'] = 'chunked';
+        res.writeHead(proxyRes.statusCode, headers);
+
+        let fullContent = '';
+        let stopped = false;
+
+        res.on('close', () => { stopped = true; });
+
+        proxyRes.on('data', (chunk) => {
+          if (stopped) return;
+
+          const text = chunk.toString();
+
+          // Track accumulated content for dedup detection
+          for (const line of text.split('\n')) {
+            if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+              try {
+                const parsed = JSON.parse(line.slice(6));
+                const delta = parsed.choices?.[0]?.delta?.content || '';
+                fullContent += delta;
+              } catch(e) {}
             }
-          } else {
-            // Non-streaming JSON response
-            try {
-              const json = JSON.parse(responseData);
-              let content = json.choices?.[0]?.message?.content || '';
-              const deduped = deduplicateText(content);
-              if (deduped.length < content.length) {
-                console.log(`[search-middleware] Deduplicated JSON (${content.length} -> ${deduped.length} chars)`);
-                json.choices[0].message.content = deduped;
-                responseData = JSON.stringify(json);
-              }
-            } catch(e) {}
-            res.writeHead(proxyRes.statusCode, proxyRes.headers);
-            res.end(responseData);
           }
-        } catch(e) {
-          console.error('[search-middleware] Response error:', e.message);
+
+          // Online block-repeat detection (same logic as deduplicateText Strategy 1)
+          if (fullContent.length > 300) {
+            for (let blockLen = Math.floor(fullContent.length * 0.3); blockLen <= Math.floor(fullContent.length * 0.55); blockLen++) {
+              const block = fullContent.substring(0, blockLen);
+              const rest = fullContent.substring(blockLen);
+              const checkLen = Math.min(100, Math.floor(block.length * 0.4));
+              if (checkLen > 20 && rest.trimStart().startsWith(block.substring(0, checkLen).trimStart())) {
+                console.log(`[search-middleware] Streaming dedup: block repeat at char ${blockLen}, stopping stream`);
+                stopped = true;
+                res.end('\ndata: [DONE]\n\n');
+                return;
+              }
+            }
+          }
+
+          // Forward chunk immediately to keep connection alive
+          res.write(chunk);
+        });
+
+        proxyRes.on('end', () => {
+          if (!stopped) res.end();
+        });
+      } else {
+        // Non-streaming JSON response — buffer and deduplicate
+        let responseData = '';
+        proxyRes.on('data', c => responseData += c);
+        proxyRes.on('end', () => {
+          try {
+            const json = JSON.parse(responseData);
+            let content = json.choices?.[0]?.message?.content || '';
+            const deduped = deduplicateText(content);
+            if (deduped.length < content.length) {
+              console.log(`[search-middleware] Deduplicated JSON (${content.length} -> ${deduped.length} chars)`);
+              json.choices[0].message.content = deduped;
+              responseData = JSON.stringify(json);
+            }
+          } catch(e) {}
           res.writeHead(proxyRes.statusCode, proxyRes.headers);
           res.end(responseData);
-        }
-      });
+        });
+      }
     });
     proxyReq.on('error', (e) => {
       clearTimeout(responseTimer);
       if (responseTimedOut) return;
-      res.writeHead(502);
-      res.end('Proxy error: ' + e.message);
+      if (!res.headersSent) {
+        res.writeHead(502);
+        res.end('Proxy error: ' + e.message);
+      }
     });
 
     // 10-minute response timeout — abort if cursor-api-proxy hangs
