@@ -126,16 +126,14 @@ function detectSearchIntent(text) {
   return text;
 }
 
-// Robust deduplication: detects repeated blocks at any split point
+// Robust deduplication: detects repeated blocks at any split point (used for non-streaming JSON)
 function deduplicateText(text) {
   if (!text || text.length < 60) return text;
 
   // Strategy 1: Find any position where a block of text is immediately repeated
-  // Scan for the earliest repeat: check if text[i..i+len] == text[i+len..i+2*len]
   for (let blockLen = Math.floor(text.length * 0.3); blockLen <= Math.floor(text.length * 0.55); blockLen++) {
     const block = text.substring(0, blockLen);
     const rest = text.substring(blockLen);
-    // Check if the rest starts with a significant portion of the block
     const checkLen = Math.min(100, Math.floor(block.length * 0.4));
     if (checkLen > 20 && rest.trimStart().startsWith(block.substring(0, checkLen).trimStart())) {
       console.log(`[search-middleware] Dedup: block repeat found at char ${blockLen}`);
@@ -144,7 +142,6 @@ function deduplicateText(text) {
   }
 
   // Strategy 2: Split into sentences/segments, remove consecutive and near-consecutive duplicates
-  // Use a regex that handles missing spaces after punctuation too (e.g., "sentence.Next sentence")
   const segments = text.split(/(?<=[.!?。\n])(?:\s+|(?=[A-ZА-ЯЁ]))/);
   if (segments.length > 2) {
     const unique = [segments[0]];
@@ -188,6 +185,10 @@ async function handleRequest(req, res) {
     if (aborted) return;
     console.log(`[search-middleware] ${req.method} ${req.url} (${body.length} bytes)`);
 
+    // Track whether we sent early SSE headers (for streaming chat requests)
+    let earlyHeaders = false;
+    let keepaliveTimer = null;
+
     // Only intercept chat completions POST
     if (req.method === 'POST' && req.url.includes('/chat/completions')) {
       try {
@@ -196,6 +197,20 @@ async function handleRequest(req, res) {
 
         // Strip images early — Cursor CLI can't handle base64, and they cause E2BIG
         stripImages(messages);
+
+        // For streaming requests, send SSE headers immediately to prevent client timeout
+        // during the search/fetch phase (which can take 15-30s)
+        if (payload.stream !== false) {
+          res.writeHead(200, {
+            'content-type': 'text/event-stream',
+            'cache-control': 'no-cache',
+            'connection': 'keep-alive',
+          });
+          earlyHeaders = true;
+          keepaliveTimer = setInterval(() => {
+            if (!res.writableEnded) res.write(': keepalive\n\n');
+          }, 5000);
+        }
 
         const lastMsg = messages[messages.length - 1];
 
@@ -340,7 +355,7 @@ async function handleRequest(req, res) {
       }
     }
 
-    // Forward to cursor-api-proxy — stream SSE through immediately to prevent client timeouts
+    // Forward to cursor-api-proxy — stream SSE with sentence-level dedup
     const isChat = req.method === 'POST' && req.url.includes('/chat/completions');
     let responseTimedOut = false;
     const proxyReq = http.request({
@@ -351,69 +366,128 @@ async function handleRequest(req, res) {
       headers: { ...req.headers, 'content-length': Buffer.byteLength(body), host: `127.0.0.1:${CURSOR_PROXY_PORT}` },
     }, (proxyRes) => {
       clearTimeout(responseTimer);
+      if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
       if (responseTimedOut) return;
 
       if (!isChat) {
-        res.writeHead(proxyRes.statusCode, proxyRes.headers);
+        if (!earlyHeaders) res.writeHead(proxyRes.statusCode, proxyRes.headers);
         proxyRes.pipe(res);
         return;
       }
 
-      const isSSE = proxyRes.headers['content-type']?.includes('text/event-stream');
+      const isSSE = proxyRes.headers['content-type']?.includes('text/event-stream') || earlyHeaders;
 
       if (isSSE) {
-        // Stream SSE chunks through immediately — prevents webchat timeout
-        // Online block-repeat detection: stop streaming if content starts repeating
-        const headers = { ...proxyRes.headers };
-        delete headers['content-length'];
-        headers['transfer-encoding'] = 'chunked';
-        res.writeHead(proxyRes.statusCode, headers);
+        // Send headers if not sent early
+        if (!earlyHeaders) {
+          const headers = { ...proxyRes.headers };
+          delete headers['content-length'];
+          headers['transfer-encoding'] = 'chunked';
+          res.writeHead(proxyRes.statusCode, headers);
+        }
 
-        let fullContent = '';
+        // Streaming response with sentence-level dedup
+        // Parse content deltas, buffer at sentence boundaries, skip duplicate sentences
+        let received = '';      // All text content received from upstream
+        let flushedLen = 0;     // Offset into `received` up to which we've flushed
+        let seenSentences = new Set();
         let stopped = false;
+        let sseLineBuf = '';    // Buffer for partial SSE lines across chunks
 
         res.on('close', () => { stopped = true; });
 
+        function emitDelta(text) {
+          if (stopped || !text) return;
+          const evt = JSON.stringify({ choices: [{ index: 0, delta: { content: text } }] });
+          res.write(`data: ${evt}\n\n`);
+        }
+
+        function flushSentences(flush) {
+          if (stopped) return;
+          const pending = received.substring(flushedLen);
+          if (!pending) return;
+
+          // Find last sentence boundary: punctuation followed by whitespace or end of string
+          let lastEnd = -1;
+          for (let i = pending.length - 1; i >= 0; i--) {
+            if ('.!?。'.includes(pending[i]) && (i === pending.length - 1 || /\s/.test(pending[i + 1]))) {
+              lastEnd = i; break;
+            }
+            if (pending[i] === '\n') { lastEnd = i; break; }
+          }
+
+          if (lastEnd < 0 && !flush) return; // No complete sentence yet, wait for more data
+
+          const toProcess = lastEnd >= 0 ? pending.substring(0, lastEnd + 1) : pending;
+
+          // Split into sentences at punctuation + whitespace boundaries
+          const sentences = toProcess.split(/(?<=[.!?。])\s+/);
+          let output = '';
+
+          for (const s of sentences) {
+            const trimmed = s.trim();
+            if (!trimmed) continue;
+            if (trimmed.length < 15) { output += s + ' '; continue; } // Short fragments pass through
+            if (seenSentences.has(trimmed)) {
+              console.log(`[search-middleware] Streaming dedup: skipped duplicate sentence`);
+              continue;
+            }
+            seenSentences.add(trimmed);
+            output += s + ' ';
+          }
+
+          if (output.trim()) emitDelta(output);
+          flushedLen += toProcess.length;
+          // Skip leading whitespace in remaining buffer
+          while (flushedLen < received.length && received[flushedLen] === ' ') flushedLen++;
+        }
+
         proxyRes.on('data', (chunk) => {
           if (stopped) return;
+          sseLineBuf += chunk.toString();
 
-          const text = chunk.toString();
-
-          // Track accumulated content for dedup detection
-          for (const line of text.split('\n')) {
-            if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+          // Process complete SSE lines (handle partial lines across chunks)
+          let nlIdx;
+          while ((nlIdx = sseLineBuf.indexOf('\n')) >= 0) {
+            const line = sseLineBuf.substring(0, nlIdx).trim();
+            sseLineBuf = sseLineBuf.substring(nlIdx + 1);
+            if (!line) continue;
+            if (line === 'data: [DONE]') continue; // We send our own [DONE]
+            if (line.startsWith('data: ')) {
               try {
                 const parsed = JSON.parse(line.slice(6));
                 const delta = parsed.choices?.[0]?.delta?.content || '';
-                fullContent += delta;
+                if (delta) received += delta;
               } catch(e) {}
             }
           }
 
-          // Online block-repeat detection (same logic as deduplicateText Strategy 1)
-          if (fullContent.length > 300) {
-            for (let blockLen = Math.floor(fullContent.length * 0.3); blockLen <= Math.floor(fullContent.length * 0.55); blockLen++) {
-              const block = fullContent.substring(0, blockLen);
-              const rest = fullContent.substring(blockLen);
+          flushSentences(false);
+
+          // Block-level repeat detection (catch large repeated blocks)
+          if (received.length > 300) {
+            for (let blockLen = Math.floor(received.length * 0.3); blockLen <= Math.floor(received.length * 0.55); blockLen++) {
+              const block = received.substring(0, blockLen);
+              const rest = received.substring(blockLen);
               const checkLen = Math.min(100, Math.floor(block.length * 0.4));
               if (checkLen > 20 && rest.trimStart().startsWith(block.substring(0, checkLen).trimStart())) {
-                console.log(`[search-middleware] Streaming dedup: block repeat at char ${blockLen}, stopping stream`);
+                console.log(`[search-middleware] Streaming dedup: block repeat at char ${blockLen}, stopping`);
                 stopped = true;
                 res.end('\ndata: [DONE]\n\n');
                 return;
               }
             }
           }
-
-          // Forward chunk immediately to keep connection alive
-          res.write(chunk);
         });
 
         proxyRes.on('end', () => {
-          if (!stopped) res.end();
+          if (!stopped) {
+            flushSentences(true); // Flush remaining buffered content
+            res.end('data: [DONE]\n\n');
+          }
         });
       } else {
-        // Non-streaming JSON response — buffer and deduplicate
+        // Non-streaming JSON response — buffer and deduplicate fully
         let responseData = '';
         proxyRes.on('data', c => responseData += c);
         proxyRes.on('end', () => {
@@ -427,15 +501,20 @@ async function handleRequest(req, res) {
               responseData = JSON.stringify(json);
             }
           } catch(e) {}
-          res.writeHead(proxyRes.statusCode, proxyRes.headers);
+          if (!earlyHeaders) res.writeHead(proxyRes.statusCode, proxyRes.headers);
           res.end(responseData);
         });
       }
     });
     proxyReq.on('error', (e) => {
+      if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
       clearTimeout(responseTimer);
       if (responseTimedOut) return;
-      if (!res.headersSent) {
+      if (earlyHeaders) {
+        // Already sent 200 SSE headers — send error as SSE event
+        const errEvt = JSON.stringify({ choices: [{ index: 0, delta: { content: '\n\n[Error: ' + e.message + ']' }, finish_reason: 'stop' }] });
+        res.end(`data: ${errEvt}\n\ndata: [DONE]\n\n`);
+      } else if (!res.headersSent) {
         res.writeHead(502);
         res.end('Proxy error: ' + e.message);
       }
@@ -445,8 +524,12 @@ async function handleRequest(req, res) {
     const responseTimer = setTimeout(() => {
       responseTimedOut = true;
       proxyReq.destroy();
+      if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
       console.log('[search-middleware] Response timeout (10 min), aborting request');
-      if (!res.headersSent) {
+      if (earlyHeaders) {
+        const errEvt = JSON.stringify({ choices: [{ index: 0, delta: { content: '\n\n[Error: Response timed out. Please try again.]' }, finish_reason: 'stop' }] });
+        res.end(`data: ${errEvt}\n\ndata: [DONE]\n\n`);
+      } else if (!res.headersSent) {
         res.writeHead(504, { 'content-type': 'application/json' });
         res.end(JSON.stringify({
           error: { message: 'Response timed out after 10 minutes. Please try again.', type: 'timeout' }
