@@ -101,13 +101,24 @@ async function handleChatCompletions(req, res, body) {
   }
 }
 
+function proxyHeaders(req) {
+  const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress;
+  const publicDomain = process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost';
+  return {
+    ...req.headers,
+    'x-forwarded-proto': 'https',
+    'x-forwarded-host': publicDomain,
+    'x-forwarded-for': clientIp || '127.0.0.1',
+  };
+}
+
 function forwardToOpenclaw(req, res, body) {
   const proxyReq = http.request({
     hostname: '127.0.0.1',
     port: OPENCLAW_PORT,
     path: req.url,
     method: req.method,
-    headers: req.headers,
+    headers: proxyHeaders(req),
   }, (proxyRes) => {
     res.writeHead(proxyRes.statusCode, proxyRes.headers);
     proxyRes.pipe(res);
@@ -152,7 +163,7 @@ const server = http.createServer((req, res) => {
     port: OPENCLAW_PORT,
     path: req.url,
     method: req.method,
-    headers: req.headers,
+    headers: proxyHeaders(req),
   }, (proxyRes) => {
     res.writeHead(proxyRes.statusCode, proxyRes.headers);
     proxyRes.pipe(res);
@@ -171,6 +182,12 @@ server.on('upgrade', (req, socket, head) => {
     for (let i = 0; i < req.rawHeaders.length; i += 2) {
       proxy.write(`${req.rawHeaders[i]}: ${req.rawHeaders[i+1]}\r\n`);
     }
+    // Inject proxy headers so OpenClaw knows this is a proxied HTTPS connection
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress;
+    const publicDomain = process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost';
+    proxy.write(`X-Forwarded-Proto: https\r\n`);
+    proxy.write(`X-Forwarded-Host: ${publicDomain}\r\n`);
+    if (clientIp) proxy.write(`X-Forwarded-For: ${clientIp}\r\n`);
     proxy.write('\r\n');
     if (head.length) proxy.write(head);
 

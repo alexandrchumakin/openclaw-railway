@@ -67,11 +67,15 @@ const tpl = JSON.parse(fs.readFileSync('/opt/openclaw-template.json','utf8'));
 cfg.gateway = {...(cfg.gateway||{}), ...tpl.gateway};
 cfg.channels = tpl.channels;
 if (cfg.models?.providers?.['cursor-proxy']) {
-  cfg.models.providers['cursor-proxy'].baseUrl = 'http://127.0.0.1:8766/v1';
-  if (cfg.models.providers['cursor-proxy'].models?.[0]) {
-    cfg.models.providers['cursor-proxy'].models[0].contextWindow = 200000;
-    cfg.models.providers['cursor-proxy'].models[0].maxTokens = 16384;
+  const p = cfg.models.providers['cursor-proxy'];
+  p.baseUrl = 'http://127.0.0.1:8766/v1';
+  if (!p.models || !p.models.length) {
+    p.models = [{ id: 'claude-4.6-opus-max-thinking', contextWindow: 200000, maxTokens: 16384 }];
+  } else {
+    p.models[0].contextWindow = 200000;
+    p.models[0].maxTokens = 16384;
   }
+  console.log('Model config:', JSON.stringify(p.models[0]));
 }
 cfg.tools = { profile: 'minimal' };
 fs.writeFileSync('/root/.openclaw/openclaw.json', JSON.stringify(cfg, null, 2));
