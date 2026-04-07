@@ -72,10 +72,9 @@ if (cfg.models?.providers?.['cursor-proxy']) {
   if (!p.models || !p.models.length) {
     p.models = [{ id: 'claude-4.6-opus-max-thinking', contextWindow: 200000, maxTokens: 16384 }];
   } else {
-    p.models[0].contextWindow = 200000;
-    p.models[0].maxTokens = 16384;
+    for (const m of p.models) { m.contextWindow = 200000; m.maxTokens = 16384; }
   }
-  console.log('Model config:', JSON.stringify(p.models[0]));
+  console.log('Model configs:', p.models.map(m => m.id + ':ctx=' + m.contextWindow).join(', '));
 }
 cfg.tools = { profile: 'minimal' };
 fs.writeFileSync('/root/.openclaw/openclaw.json', JSON.stringify(cfg, null, 2));
