@@ -20,7 +20,11 @@
     "whatsapp": {
       "enabled": true,
       "dmPolicy": "pairing",
-      "groupPolicy": "open"
+      "groupPolicy": "open",
+      "historyLimit": 50,
+      "groups": {
+        "*": { "requireMention": true }
+      }
     }
   },
   "agents": {
@@ -30,6 +34,15 @@
       "model": {
         "primary": "cursor-proxy/claude-4.6-opus-max-thinking"
       }
-    }
+    },
+    "list": [
+      {
+        "id": "main",
+        "groupChat": {
+          "historyLimit": 50,
+          "mentionPatterns": ["@?openclaw", "\\+?31618404200"]
+        }
+      }
+    ]
   }
 }
