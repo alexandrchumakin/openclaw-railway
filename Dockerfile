@@ -11,13 +11,14 @@ ENV PATH="/root/.local/bin:${PATH}"
 ENV CURSOR_AGENT_BIN="/root/.local/bin/agent"
 
 # Install OpenClaw
-RUN npm install -g openclaw@latest
+RUN npm install -g openclaw@latest grammy
+RUN openclaw plugins install @openclaw/whatsapp
 
 # Install cursor-api-proxy
 RUN cd /opt && git clone https://github.com/anyrobert/cursor-api-proxy.git && \
     cd cursor-api-proxy && npm install && npm run build
 
-RUN mkdir -p /root/.openclaw/agents/main/sessions /root/.openclaw/credentials
+RUN mkdir -p /root/.openclaw/agents/main/sessions /root/.openclaw/credentials/whatsapp
 RUN chmod 700 /root/.openclaw
 
 # Create agent workspace with rules that forbid web tools (they're sandboxed and always fail)

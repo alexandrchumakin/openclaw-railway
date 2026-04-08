@@ -53,6 +53,12 @@ else
   echo "Existing install detected — skipping onboard, preserving sessions"
 fi
 
+# Ensure WhatsApp plugin is installed (survives container rebuild)
+if ! openclaw plugins list 2>/dev/null | grep -q whatsapp; then
+  echo "Installing WhatsApp plugin..."
+  openclaw plugins install @openclaw/whatsapp 2>&1 || echo "WhatsApp plugin install failed (will retry next boot)"
+fi
+
 # Always update SOUL.md and config settings (but preserve sessions/memory)
 DOMAIN="${RAILWAY_PUBLIC_DOMAIN:-localhost}"
 mkdir -p /root/.openclaw/workspace /root/.openclaw/agents/main/agent

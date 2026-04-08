@@ -16,6 +16,13 @@
       "allowFrom": ["*"],
       "groupPolicy": "open",
       "blockStreamingCoalesce": {}
+    },
+    "whatsapp": {
+      "enabled": true,
+      "dmPolicy": "pairing",
+      "groupPolicy": "open",
+      "blockStreamingCoalesce": {},
+      "sendReadReceipts": true
     }
   },
   "agents": {

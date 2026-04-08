@@ -2,12 +2,12 @@
 
 ## Project Overview
 
-OpenClaw AI gateway on Railway with Cursor as the LLM backend, Telegram as the primary channel, and a custom web search system using DuckDuckGo + Playwright (headless Chromium). The search middleware intercepts LLM requests, detects search intent, opens pages in a real Chrome browser, and injects results into the conversation context. The Cursor agent is sandboxed and has no working tools — all web access is handled by the middleware.
+OpenClaw AI gateway on Railway with Cursor as the LLM backend, Telegram and WhatsApp as messaging channels, and a custom web search system using DuckDuckGo + Playwright (headless Chromium). The search middleware intercepts LLM requests, detects search intent, opens pages in a real Chrome browser, and injects results into the conversation context. The Cursor agent is sandboxed and has no working tools — all web access is handled by the middleware.
 
 ## Architecture
 
 ```
-Telegram → OpenClaw (18789) → Search Middleware (8766) → cursor-api-proxy (8765) → Cursor Agent CLI
+Telegram/WhatsApp → OpenClaw (18789) → Search Middleware (8766) → cursor-api-proxy (8765) → Cursor Agent CLI
                                        ↓                        ↓
                               DuckDuckGo Search Proxy (9876)    /opt/agent-workspace (.cursorrules)
                               Playwright Chromium browser
@@ -18,7 +18,7 @@ Traffic flow: Public $PORT → router.js → OpenClaw gateway (18789) or search 
 
 ### Web Search & Page Fetching Flow
 
-1. User sends message via Telegram
+1. User sends message via Telegram or WhatsApp
 2. OpenClaw forwards to Search Middleware (port 8766)
 3. Middleware extracts user text from OpenClaw metadata wrapper
 4. Middleware detects URLs in user message → fetches them directly via Playwright (6000 chars each)
@@ -26,7 +26,7 @@ Traffic flow: Public $PORT → router.js → OpenClaw gateway (18789) or search 
 6. URL fetches and DDG search run in parallel; DDG ad tracking URLs are filtered out
 7. All results injected as a system message before the user's message
 8. cursor-api-proxy receives enriched context → Cursor Agent CLI responds using the provided content
-9. Response is deduplicated (block-repeat and sentence-level) and sent back through OpenClaw to Telegram
+9. Response is deduplicated (block-repeat and sentence-level) and sent back through OpenClaw to Telegram/WhatsApp
 
 ### Tool Sandbox Constraints
 
@@ -81,6 +81,7 @@ Railway volume mounted at `/root/.openclaw` preserves:
 - Sessions and conversation history
 - Agent memory
 - Auth token (prevents token_mismatch)
+- WhatsApp credentials (after QR code linking)
 - First-boot marker
 
 **To force clean reset**: add `FORCE_REINIT=1` env var, deploy, remove var.
@@ -97,6 +98,25 @@ Edit `SOUL.md`. Changes apply on next deploy without FORCE_REINIT.
 
 ### Modify agent tool restrictions
 Edit `.cursorrules`. This is copied to `/opt/agent-workspace/.cursorrules` during Docker build. Tells the Cursor agent which tools are forbidden.
+
+### Set up WhatsApp channel (first time)
+1. Deploy the container (WhatsApp config is already in openclaw.json)
+2. Open a shell: `railway shell` or use Railway's web console
+3. Run: `openclaw channels login --channel whatsapp`
+4. Scan the QR code with WhatsApp mobile app (Settings > Linked Devices > Link a Device)
+5. Wait for "Login successful" message
+6. Credentials persist in `/root/.openclaw/credentials/whatsapp/` and survive redeploys
+
+### Re-link WhatsApp (if logged out)
+Same as first-time setup — run `openclaw channels login --channel whatsapp` from a Railway shell.
+
+### Approve WhatsApp contacts (pairing mode)
+WhatsApp uses `dmPolicy: "pairing"` — new senders need approval:
+```bash
+openclaw pairing list whatsapp
+openclaw pairing approve whatsapp <CODE>
+```
+Pairing requests expire after 1 hour; max 3 pending per channel.
 
 ### Fix "Config invalid" errors
 OpenClaw's schema is very strict. Common invalid keys we discovered:
@@ -158,12 +178,13 @@ If the agent says "WebFetch is blocked" or tries curl:
 4. **Response deduplication** — Cursor's thinking model sometimes duplicates content. The middleware handles this with block-repeat detection and sentence-level dedup, but edge cases may still occur.
 5. **Some sites block even Playwright** — Sites with Captcha/WAF (e.g., Amazon) may return empty content even from headless Chrome. The middleware returns whatever it can get.
 6. **Playwright page timeout** — Some slow sites may exceed the 15s per-page timeout. Check logs for `Playwright fetch failed`.
-7. **E2BIG spawn error** — If conversation + search context exceeds ~120KB, cursor-api-proxy's `spawn` fails. The middleware auto-trims payload by dropping older messages and truncating content. Check for `Trimmed payload` in logs.
+7. **WhatsApp QR code linking** — Must be done manually from a Railway shell after first deploy. If the WhatsApp session expires or is revoked from the phone, re-linking is needed via the same process. Max 4 linked devices per WhatsApp account (phone + OpenClaw + 2 others).
+8. **E2BIG spawn error** — If conversation + search context exceeds ~120KB, cursor-api-proxy's `spawn` fails. The middleware auto-trims payload by dropping older messages and truncating content. Check for `Trimmed payload` in logs.
 
 ## Use Case Context
 
 Primary use cases:
-1. General AI assistant via Telegram
+1. General AI assistant via Telegram and WhatsApp
 2. Web search and research (with real Chrome browser page fetching)
 3. Translation
 4. Product comparison and shopping research
