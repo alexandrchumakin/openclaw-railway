@@ -15,13 +15,13 @@
       "dmPolicy": "open",
       "allowFrom": ["*"],
       "groupPolicy": "open",
-      "blockStreamingCoalesce": {}
+      "streaming": { "block": { "enabled": true, "coalesce": true } }
     },
     "whatsapp": {
       "enabled": true,
       "dmPolicy": "pairing",
       "groupPolicy": "open",
-      "blockStreamingCoalesce": {},
+      "streaming": { "block": { "enabled": true, "coalesce": true } },
       "sendReadReceipts": true
     }
   },
