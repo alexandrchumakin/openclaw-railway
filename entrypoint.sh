@@ -11,6 +11,7 @@ echo "Search proxy started on port 9876"
 # Use custom workspace with .cursorrules to forbid WebFetch/Shell/WebSearch (they're sandboxed)
 cd /opt/cursor-api-proxy
 CURSOR_API_KEY="${CURSOR_API_KEY}" \
+  CURSOR_BRIDGE_MODE="agent" \
   CURSOR_BRIDGE_WORKSPACE="/opt/agent-workspace" \
   CURSOR_BRIDGE_CHAT_ONLY_WORKSPACE="false" \
   CURSOR_BRIDGE_FORCE="true" \

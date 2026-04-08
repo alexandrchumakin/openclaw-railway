@@ -18,7 +18,9 @@ RUN cd /usr/local/lib/node_modules/openclaw && npm install --no-save @buape/carb
 
 # Install cursor-api-proxy
 RUN cd /opt && git clone https://github.com/anyrobert/cursor-api-proxy.git && \
-    cd cursor-api-proxy && npm install && npm run build
+    cd cursor-api-proxy && npm install && \
+    sed -i 's/args\.push("--mode", "ask")/args.push("--mode", process.env.CURSOR_BRIDGE_MODE || "ask")/' src/lib/agent-cmd-args.ts && \
+    npm run build
 
 RUN mkdir -p /root/.openclaw/agents/main/sessions /root/.openclaw/credentials/whatsapp
 RUN chmod 700 /root/.openclaw
