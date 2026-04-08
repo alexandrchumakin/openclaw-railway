@@ -7,7 +7,7 @@ const fs = require('fs');
 const url = require('url');
 
 const PORT = 9877;
-const CREDS_PATH = '/root/.openclaw/credentials/whatsapp/creds.json';
+const CREDS_PATH = '/root/.openclaw/credentials/whatsapp/default/creds.json';
 
 function getAuthToken() {
   try {

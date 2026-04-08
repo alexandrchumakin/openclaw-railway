@@ -54,13 +54,20 @@ else
   echo "Existing install detected — skipping onboard, preserving sessions"
 fi
 
+# Migrate WhatsApp creds from old location to account subdirectory
+if [ -f "/root/.openclaw/credentials/whatsapp/creds.json" ] && [ ! -f "/root/.openclaw/credentials/whatsapp/default/creds.json" ]; then
+  echo "Migrating WhatsApp credentials to default account directory..."
+  mkdir -p /root/.openclaw/credentials/whatsapp/default
+  mv /root/.openclaw/credentials/whatsapp/*.json /root/.openclaw/credentials/whatsapp/default/ 2>/dev/null || true
+fi
+
 # Decode WhatsApp credentials from env var (set by wa-local-link.js)
-if [ -n "$WHATSAPP_CREDS" ] && [ ! -f "/root/.openclaw/credentials/whatsapp/creds.json" ]; then
+if [ -n "$WHATSAPP_CREDS" ] && [ ! -f "/root/.openclaw/credentials/whatsapp/default/creds.json" ]; then
   echo "Decoding WhatsApp credentials from WHATSAPP_CREDS env var..."
   node -e "
     const bundle = JSON.parse(Buffer.from(process.env.WHATSAPP_CREDS, 'base64').toString());
     const fs = require('fs');
-    const dir = '/root/.openclaw/credentials/whatsapp';
+    const dir = '/root/.openclaw/credentials/whatsapp/default';
     fs.mkdirSync(dir, { recursive: true });
     for (const [name, content] of Object.entries(bundle)) {
       fs.writeFileSync(dir + '/' + name, content);
