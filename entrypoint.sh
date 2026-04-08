@@ -116,6 +116,22 @@ echo "============================================"
 node /opt/node-auto-approve.js &
 echo "Node auto-approve daemon started"
 
+# Auto-trigger WhatsApp login if not linked yet (QR code appears in Deploy Logs)
+if [ ! -f "/root/.openclaw/credentials/whatsapp/creds.json" ]; then
+  echo "============================================"
+  echo "WHATSAPP NOT LINKED"
+  echo "QR code will appear below in Deploy Logs"
+  echo "Open WhatsApp > Settings > Linked Devices > Link a Device"
+  echo "Then scan the QR code from the logs"
+  echo "============================================"
+  # Run in background so it doesn't block the gateway; timeout after 3 min
+  (openclaw channels login --channel whatsapp 2>&1; echo "[whatsapp] Login process exited") &
+  WA_LOGIN_PID=$!
+  (sleep 180 && kill $WA_LOGIN_PID 2>/dev/null && echo "[whatsapp] Login timed out — redeploy to try again") &
+else
+  echo "WhatsApp credentials found — already linked"
+fi
+
 # Start router (handles both OpenClaw + search proxy on $PORT)
 node /opt/router.js &
 
