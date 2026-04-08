@@ -11,7 +11,7 @@ ENV PATH="/root/.local/bin:${PATH}"
 ENV CURSOR_AGENT_BIN="/root/.local/bin/agent"
 
 # Install OpenClaw
-RUN npm install -g openclaw@latest grammy
+RUN npm install -g openclaw@latest grammy @grammyjs/runner
 RUN openclaw plugins install @openclaw/whatsapp
 
 # Install cursor-api-proxy
