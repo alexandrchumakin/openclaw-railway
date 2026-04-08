@@ -14,6 +14,7 @@ CURSOR_API_KEY="${CURSOR_API_KEY}" \
   CURSOR_BRIDGE_WORKSPACE="/opt/agent-workspace" \
   CURSOR_BRIDGE_CHAT_ONLY_WORKSPACE="false" \
   CURSOR_BRIDGE_FORCE="true" \
+  CURSOR_BRIDGE_TIMEOUT="180000" \
   npm start &
 CURSOR_PID=$!
 sleep 3
@@ -93,7 +94,7 @@ if (cfg.models?.providers?.['cursor-proxy']) {
   if (!p.models || !p.models.length) {
     p.models = [{ id: 'claude-4.6-opus-max-thinking', contextWindow: 200000, maxTokens: 16384 }];
   } else {
-    for (const m of p.models) { m.contextWindow = 200000; m.maxTokens = 16384; }
+    for (const m of p.models) { m.contextWindow = 200000; m.maxTokens = 16384; m.timeoutMs = 180000; }
   }
   console.log('Model configs:', p.models.map(m => m.id + ':ctx=' + m.contextWindow).join(', '));
 }

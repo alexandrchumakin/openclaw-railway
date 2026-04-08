@@ -1,0 +1,5 @@
+node_modules/
+.wa-local-creds/
+wa-creds-small.txt
+package.json
+package-lock.json
