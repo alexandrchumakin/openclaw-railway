@@ -29,8 +29,8 @@
   },
   "agents": {
     "defaults": {
-      "timeoutSeconds": 300,
-      "llm": { "idleTimeoutSeconds": 180 },
+      "timeoutSeconds": 600,
+      "llm": { "idleTimeoutSeconds": 300 },
       "model": {
         "primary": "cursor-proxy/claude-4.6-opus-max-thinking"
       }
