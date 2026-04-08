@@ -149,6 +149,23 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // WhatsApp QR code linking page
+  if (req.url.startsWith('/wa-link')) {
+    const proxyReq = http.request({
+      hostname: '127.0.0.1',
+      port: 9877,
+      path: req.url,
+      method: req.method,
+      headers: req.headers,
+    }, (proxyRes) => {
+      res.writeHead(proxyRes.statusCode, proxyRes.headers);
+      proxyRes.pipe(res);
+    });
+    proxyReq.on('error', (e) => { res.writeHead(502); res.end(e.message); });
+    req.pipe(proxyReq);
+    return;
+  }
+
   // Intercept chat completions to inject search results
   if (req.method === 'POST' && req.url.includes('/chat/completions')) {
     let body = '';
