@@ -53,6 +53,21 @@ else
   echo "Existing install detected — skipping onboard, preserving sessions"
 fi
 
+# Decode WhatsApp credentials from env var (set by wa-local-link.js)
+if [ -n "$WHATSAPP_CREDS" ] && [ ! -f "/root/.openclaw/credentials/whatsapp/creds.json" ]; then
+  echo "Decoding WhatsApp credentials from WHATSAPP_CREDS env var..."
+  node -e "
+    const bundle = JSON.parse(Buffer.from(process.env.WHATSAPP_CREDS, 'base64').toString());
+    const fs = require('fs');
+    const dir = '/root/.openclaw/credentials/whatsapp';
+    fs.mkdirSync(dir, { recursive: true });
+    for (const [name, content] of Object.entries(bundle)) {
+      fs.writeFileSync(dir + '/' + name, content);
+    }
+    console.log('WhatsApp credentials written:', Object.keys(bundle).join(', '));
+  "
+fi
+
 # Ensure WhatsApp plugin is installed (survives container rebuild)
 if ! openclaw plugins list 2>/dev/null | grep -q whatsapp; then
   echo "Installing WhatsApp plugin..."

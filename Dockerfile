@@ -11,11 +11,8 @@ ENV PATH="/root/.local/bin:${PATH}"
 ENV CURSOR_AGENT_BIN="/root/.local/bin/agent"
 
 # Install OpenClaw
-RUN npm install -g openclaw@latest grammy @grammyjs/runner @grammyjs/transformer-throttler @grammyjs/types @buape/carbon
+RUN npm install -g openclaw@latest grammy @grammyjs/runner @grammyjs/transformer-throttler @grammyjs/types @buape/carbon @larksuiteoapi/node-sdk
 RUN openclaw plugins install @openclaw/whatsapp
-
-# WhatsApp QR code linking dependencies (Baileys + QR image generator)
-RUN cd /opt && npm install @whiskeysockets/baileys qrcode
 
 # Install cursor-api-proxy
 RUN cd /opt && git clone https://github.com/anyrobert/cursor-api-proxy.git && \
