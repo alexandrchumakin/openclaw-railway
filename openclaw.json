@@ -19,7 +19,8 @@
     },
     "whatsapp": {
       "enabled": true,
-      "dmPolicy": "pairing",
+      "dmPolicy": "open",
+      "allowFrom": ["*"],
       "groupPolicy": "open",
       "historyLimit": 50,
       "groups": {
