@@ -1,6 +1,7 @@
 FROM node:22-slim
 
-RUN apt-get update && apt-get install -y git socat curl netcat-openbsd && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y git socat curl netcat-openbsd python3 python3-pip && rm -rf /var/lib/apt/lists/*
+RUN pip3 install --no-cache-dir gcalcli
 
 # Install Playwright with Chromium for fetching JS-heavy pages
 RUN cd /opt && npm install playwright@latest && npx playwright install --with-deps chromium

@@ -2,7 +2,7 @@
 
 ## Project Summary
 
-OpenClaw AI gateway on Railway using Cursor (Claude 4.6 Opus Thinking) as the LLM backend, with Telegram as the primary channel and a custom web search + page fetching system using DuckDuckGo + Playwright (headless Chromium). The middleware opens real web pages in Chrome and injects content into the LLM context. The Cursor agent is sandboxed and has no working tools.
+OpenClaw AI gateway on Railway using Cursor (Claude 4.6 Opus Thinking) as the LLM backend, with Telegram as the primary channel and a custom web search + page fetching system using DuckDuckGo + Playwright (headless Chromium). The middleware opens real web pages in Chrome and injects content into the LLM context. The Cursor agent is sandboxed: web tools are blocked, but local runtime tools can be used.
 
 ## Architecture
 
@@ -16,7 +16,7 @@ User (Telegram) → OpenClaw Gateway (:18789)
         - Injects all results as system message
         - Deduplicates response (block-repeat + sentence-level)
     → cursor-api-proxy (:8765) [translates OpenAI API → Cursor Agent CLI]
-    → Cursor Agent CLI [runs Claude 4.6 Opus Thinking, sandboxed, no tools work]
+    → Cursor Agent CLI [runs Claude 4.6 Opus Thinking, sandboxed: web tools blocked]
 
 Search Proxy (:9876)
     - /search?q=<query>&count=5  → DuckDuckGo HTML scraper (filters out DDG ad tracking URLs)
@@ -34,7 +34,7 @@ entrypoint.sh           → Startup: onboard (first boot only), config merge, pr
                           cursor-api-proxy runs with WORKSPACE=/opt/agent-workspace, FORCE=true, CHAT_ONLY=false
 openclaw.json           → Config template (channels, gateway, model). Strict JSON — unknown keys crash OpenClaw
 SOUL.md                 → Agent personality + rules: use pre-fetched content, never claim access is blocked
-.cursorrules            → Cursor agent workspace rules: forbids ALL tools (WebFetch, Shell, WebSearch, browser)
+.cursorrules            → Cursor agent workspace rules: forbids web tools/network shell, allows local runtime tools
                           Copied to /opt/agent-workspace/.cursorrules during Docker build
 search-middleware.js    → Between OpenClaw and cursor-proxy. URL detection, search injection, page fetching, response deduplication
 search-proxy.js         → DuckDuckGo scraper + Playwright Chromium page fetcher on port 9876
@@ -51,9 +51,9 @@ README.md               → Human docs
 - **Persistent volume** at `/root/.openclaw` — preserves sessions, memory, auth token across deploys
 - **First-boot marker** at `/root/.openclaw/.initialized` — onboard runs only once unless `FORCE_REINIT=1`
 - **Gateway binds to localhost:18789** — cannot be changed, router.js proxies from public $PORT
-- **Cursor agent is sandboxed** — cannot make outbound HTTP. ALL web tools (WebFetch, Shell curl, WebSearch, browser) are blocked. All web access is handled by the middleware layer.
-- **Tools profile must be `minimal`** — `full` advertises non-functional web tools and confuses the agent. Valid values: `minimal`, `coding`, `messaging`, `full` (NOT `none`)
-- **Agent workspace** at `/opt/agent-workspace` — contains `.cursorrules` forbidding all tools. Must use `CURSOR_BRIDGE_FORCE=true` (trust workspace) and `CURSOR_BRIDGE_CHAT_ONLY_WORKSPACE=false` (so rules file is read)
+- **Cursor agent is sandboxed** — cannot make outbound HTTP. Web tools (WebFetch, WebSearch, browser, curl/wget to internet) are blocked. All web access is handled by the middleware layer.
+- **Tools policy** uses `profile: "minimal"` + runtime allowlist + web denylist so local runtime commands (for example `gcalcli`) can run while web tooling stays blocked.
+- **Agent workspace** at `/opt/agent-workspace` — contains `.cursorrules` with web-tool restrictions. Must use `CURSOR_BRIDGE_FORCE=true` (trust workspace) and `CURSOR_BRIDGE_CHAT_ONLY_WORKSPACE=false` (so rules file is read)
 
 ## Environment Variables
 
@@ -61,6 +61,7 @@ README.md               → Human docs
 |----------|----------|-------------|
 | `CURSOR_API_KEY` | Yes | Cursor subscription API key |
 | `TELEGRAM_BOT_TOKEN` | Yes | From Telegram @BotFather |
+| `GCALCLI_OAUTH_BASE64` | No | Base64 content for gcalcli OAuth file (Google Calendar integration) |
 | `FORCE_REINIT` | No | Set `1` to re-onboard, then remove |
 
 ## How to Modify
@@ -74,7 +75,7 @@ Update both:
 Edit `SOUL.md`. Applied every deploy. Contains critical rules about using pre-fetched content and never claiming access is blocked.
 
 ### Agent tool restrictions
-Edit `.cursorrules`. Copied to `/opt/agent-workspace/` during Docker build. Forbids all tool usage.
+Edit `.cursorrules`. Copied to `/opt/agent-workspace/` during Docker build. Forbids web/network tools while allowing local runtime tools.
 
 ### Search behavior
 Edit `search-middleware.js`:

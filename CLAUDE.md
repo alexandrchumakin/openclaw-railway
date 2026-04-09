@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-OpenClaw AI gateway on Railway with Cursor as the LLM backend, Telegram and WhatsApp as messaging channels, and a custom web search system using DuckDuckGo + Playwright (headless Chromium). The search middleware intercepts LLM requests, detects search intent, opens pages in a real Chrome browser, and injects results into the conversation context. The Cursor agent is sandboxed and has no working tools — all web access is handled by the middleware.
+OpenClaw AI gateway on Railway with Cursor as the LLM backend, Telegram and WhatsApp as messaging channels, and a custom web search system using DuckDuckGo + Playwright (headless Chromium). The search middleware intercepts LLM requests, detects search intent, opens pages in a real Chrome browser, and injects results into the conversation context. The Cursor agent is sandboxed: web tools are blocked, while local runtime tools can be enabled.
 
 ## Architecture
 
@@ -36,7 +36,7 @@ The Cursor Agent CLI is sandboxed — **no outbound HTTP** works from within it:
 - WebSearch — blocked
 - browser — blocked
 
-This is why all web access is handled by the middleware layer BEFORE the agent sees the message. The agent workspace (`/opt/agent-workspace/.cursorrules`) explicitly forbids tool usage. OpenClaw tools are set to `profile: 'minimal'` to avoid advertising non-functional web tools.
+This is why all web access is handled by the middleware layer BEFORE the agent sees the message. The agent workspace (`/opt/agent-workspace/.cursorrules`) blocks web tools and outbound network shell usage. OpenClaw tools are configured with `profile: 'minimal'` plus a runtime allowlist so local runtime commands (for example calendar CLI) can still run.
 
 ## Key Files
 
@@ -46,7 +46,7 @@ This is why all web access is handled by the middleware layer BEFORE the agent s
 | `entrypoint.sh` | Startup orchestrator. First boot: runs `openclaw onboard`. Every boot: merges config, starts all services |
 | `openclaw.json` | Config template. Merged into runtime config on every boot. Contains gateway, channel, and model settings |
 | `SOUL.md` | Agent personality + critical rules. Injected into workspace on every boot. Tells agent to use pre-fetched content, never claim access is blocked |
-| `.cursorrules` | Cursor agent workspace rules. Forbids all tool usage (WebFetch, Shell, WebSearch, browser). Copied to `/opt/agent-workspace/` |
+| `.cursorrules` | Cursor agent workspace rules. Forbids web tools/outbound network shell usage while allowing local runtime commands. Copied to `/opt/agent-workspace/` |
 | `search-middleware.js` | Sits between OpenClaw and cursor-api-proxy. Detects search intent + URLs, calls search-proxy for DDG search and Playwright page fetching, injects results. Also deduplicates streaming responses |
 | `search-proxy.js` | DuckDuckGo HTML scraper + Playwright Chromium page fetcher. Provides `/search` (DDG) and `/fetch?url=` (browser) endpoints. Shared browser instance pre-launched on startup |
 | `router.js` | HTTP + WebSocket router. Routes /search and /fetch → search proxy, everything else → OpenClaw |
@@ -57,6 +57,7 @@ This is why all web access is handled by the middleware layer BEFORE the agent s
 |----------|----------|-------------|
 | `CURSOR_API_KEY` | Yes | Cursor subscription API key |
 | `TELEGRAM_BOT_TOKEN` | Yes | From @BotFather |
+| `GCALCLI_OAUTH_BASE64` | No | Base64 content for gcalcli OAuth file (Google Calendar integration) |
 | `FORCE_REINIT` | No | Set to `1` to force full re-onboard, then remove |
 | `PORT` | Auto | Railway injects this |
 | `RAILWAY_PUBLIC_DOMAIN` | Auto | Railway injects this |
@@ -71,7 +72,7 @@ This is why all web access is handled by the middleware layer BEFORE the agent s
 - `SOUL.md` uses `RAILWAY_DOMAIN` placeholder — replaced by `sed` at runtime
 - The gateway binds to `127.0.0.1:18789` (localhost only) — `router.js` on `0.0.0.0:$PORT` proxies to it
 - The search middleware must be at port **8766** — OpenClaw's provider config points there
-- **Tools profile must be `minimal`** — `full` advertises web_search/web_fetch/browser which don't work through Cursor sandbox and confuse the agent
+- **Tools policy** should remain constrained: `profile: "minimal"` with runtime allowlist and explicit web denylist
 - **Tools profile valid values**: `minimal`, `coding`, `messaging`, `full` — `none` is NOT valid
 - **cursor-api-proxy workspace** must be `/opt/agent-workspace` with `CURSOR_BRIDGE_FORCE=true` (workspace trust) and `CURSOR_BRIDGE_CHAT_ONLY_WORKSPACE=false` (so `.cursorrules` is read)
 
@@ -167,7 +168,7 @@ Check deploy logs for:
 If the agent says "WebFetch is blocked" or tries curl:
 - Verify `.cursorrules` exists: `docker exec <container> cat /opt/agent-workspace/.cursorrules`
 - Verify `CURSOR_BRIDGE_CHAT_ONLY_WORKSPACE=false` in logs (so workspace with rules is used)
-- Verify tools profile is `minimal` (not `full`) — `full` advertises web tools in system prompt
+- Verify tools policy in `entrypoint.sh` still sets `profile: "minimal"` + runtime allowlist + web denylist
 - Check SOUL.md has the "NEVER try to use WebFetch" rules
 
 ## Known Issues

@@ -8,7 +8,7 @@ node /opt/search-proxy.js &
 echo "Search proxy started on port 9876"
 
 # Start cursor-api-proxy in background (port 8765)
-# Use custom workspace with .cursorrules to forbid WebFetch/Shell/WebSearch (they're sandboxed)
+# Use custom workspace rules to block web tools while allowing local runtime tools (calendar, etc.)
 cd /opt/cursor-api-proxy
 CURSOR_API_KEY="${CURSOR_API_KEY}" \
   CURSOR_BRIDGE_WORKSPACE="/opt/agent-workspace" \
@@ -82,6 +82,29 @@ if ! openclaw plugins list 2>/dev/null | grep -q whatsapp; then
   openclaw plugins install @openclaw/whatsapp 2>&1 || echo "WhatsApp plugin install failed (will retry next boot)"
 fi
 
+# Persist gcalcli OAuth credentials on the mounted volume and expose default gcalcli auth path.
+GCALCLI_DIR="/root/.openclaw/credentials/gcalcli"
+GCALCLI_OAUTH_FILE="$GCALCLI_DIR/oauth"
+mkdir -p "$GCALCLI_DIR"
+ln -sf "$GCALCLI_OAUTH_FILE" /root/.gcalcli_oauth
+
+# Optional: inject gcalcli OAuth credentials from Railway variables.
+if [ -n "$GCALCLI_OAUTH_BASE64" ]; then
+  echo "Decoding gcalcli OAuth credentials from GCALCLI_OAUTH_BASE64..."
+  echo "$GCALCLI_OAUTH_BASE64" | base64 -d > "$GCALCLI_OAUTH_FILE"
+  chmod 600 "$GCALCLI_OAUTH_FILE"
+fi
+if [ -n "$GCALCLI_OAUTH_JSON" ]; then
+  echo "Writing gcalcli OAuth credentials from GCALCLI_OAUTH_JSON..."
+  printf "%s" "$GCALCLI_OAUTH_JSON" > "$GCALCLI_OAUTH_FILE"
+  chmod 600 "$GCALCLI_OAUTH_FILE"
+fi
+if [ -f "$GCALCLI_OAUTH_FILE" ]; then
+  echo "gcalcli OAuth credentials ready"
+else
+  echo "gcalcli OAuth credentials missing (Google Calendar will appear disconnected)"
+fi
+
 # Always update SOUL.md and config settings (but preserve sessions/memory)
 DOMAIN="${RAILWAY_PUBLIC_DOMAIN:-localhost}"
 mkdir -p /root/.openclaw/workspace /root/.openclaw/agents/main/agent
@@ -105,7 +128,11 @@ if (cfg.models?.providers?.['cursor-proxy']) {
   }
   console.log('Model configs:', p.models.map(m => m.id + ':ctx=' + m.contextWindow).join(', '));
 }
-cfg.tools = { profile: 'minimal' };
+cfg.tools = {
+  profile: 'minimal',
+  allow: ['group:runtime'],
+  deny: ['group:web', 'browser', 'canvas', 'web_fetch', 'web_search', 'x_search']
+};
 fs.writeFileSync('/root/.openclaw/openclaw.json', JSON.stringify(cfg, null, 2));
 console.log('Provider baseUrl:', cfg.models?.providers?.['cursor-proxy']?.baseUrl);
 "

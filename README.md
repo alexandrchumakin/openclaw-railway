@@ -29,6 +29,7 @@ In Railway → your service → **Variables**, add:
 |----------|----------|---------------|
 | `CURSOR_API_KEY` | Yes* | Cursor IDE → Settings → API Keys, or run `agent login` |
 | `TELEGRAM_BOT_TOKEN` | Yes | Message [@BotFather](https://t.me/BotFather) on Telegram → `/newbot` |
+| `GCALCLI_OAUTH_BASE64` | No | Base64-encoded gcalcli OAuth file (enables Google Calendar skill in cron/agent turns) |
 | `FORCE_REINIT` | No | Set to `1` to force re-onboard, then remove after deploy |
 
 *See "Using OpenAI/ChatGPT instead of Cursor" below for alternatives.
@@ -115,7 +116,7 @@ Telegram Bot ← OpenClaw Gateway ← Search Middleware ← cursor-api-proxy ←
 ├── entrypoint.sh           # Startup orchestrator (onboard, config merge, process management)
 ├── openclaw.json           # OpenClaw config template (channels, gateway, model settings)
 ├── SOUL.md                 # Agent personality and rules (use pre-fetched content, never claim access blocked)
-├── .cursorrules            # Cursor agent rules (forbids all tools — WebFetch, Shell, WebSearch, browser)
+├── .cursorrules            # Cursor agent rules (forbids web tools; allows local runtime tools like gcalcli)
 ├── search-proxy.js         # DuckDuckGo search + Playwright Chrome page fetcher (port 9876)
 ├── search-middleware.js    # Intercepts LLM calls, detects URLs + search, fetches pages, deduplicates responses
 ├── router.js               # HTTP/WebSocket router (public port → gateway + search proxy)
@@ -150,10 +151,10 @@ Simple HTTP fetching (curl, node http) gets blocked by many sites with anti-bot 
 
 ### Agent Tool Sandbox
 
-The Cursor Agent CLI runs in a sandbox that blocks all outbound HTTP. The agent's built-in tools (WebFetch, Shell, WebSearch) all fail. To prevent the agent from wasting time trying these tools:
+The Cursor Agent CLI runs in a sandbox that blocks outbound HTTP. Web tools fail, so web access is delegated to middleware. Local runtime tools stay enabled for tasks like calendar access.
 
-1. **`.cursorrules`** in the agent workspace explicitly forbids all tool usage
-2. **`tools: { profile: 'minimal' }`** in OpenClaw config avoids advertising non-functional web tools
+1. **`.cursorrules`** in the agent workspace explicitly forbids web tools and network shell usage
+2. **`tools: { profile: 'minimal', allow: ['group:runtime'] }`** keeps web tools hidden while allowing local runtime commands (for example `gcalcli`)
 3. **`SOUL.md`** instructs the agent to use pre-fetched content and never claim access is blocked
 
 ## Persistence & State
@@ -193,7 +194,7 @@ Edit `SOUL.md` — this is injected into the OpenClaw workspace on every boot. C
 
 ### Modifying Agent Tool Restrictions
 
-Edit `.cursorrules` — copied to `/opt/agent-workspace/` during Docker build. Explicitly forbids WebFetch, Shell, WebSearch, browser, web_fetch, web_search tools.
+Edit `.cursorrules` — copied to `/opt/agent-workspace/` during Docker build. Blocks web tools and outbound network shell commands, but allows local runtime tools.
 
 ### Telegram Channel Settings
 
@@ -245,7 +246,7 @@ Edit `search-middleware.js` → `deduplicateText()`:
 ### Agent says "access is blocked" or tries WebFetch/curl
 - Verify `.cursorrules` exists in the agent workspace
 - Verify `CURSOR_BRIDGE_CHAT_ONLY_WORKSPACE=false` in logs
-- Verify tools profile is `minimal` (not `full`) in entrypoint.sh
+- Verify tools profile in `entrypoint.sh` stays `minimal` with runtime allowlist and explicit web denies
 - Check SOUL.md has the "NEVER try to use WebFetch" rules
 
 ### Duplicate messages
