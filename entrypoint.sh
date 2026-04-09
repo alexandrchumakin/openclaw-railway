@@ -82,26 +82,31 @@ if ! openclaw plugins list 2>/dev/null | grep -q whatsapp; then
   openclaw plugins install @openclaw/whatsapp 2>&1 || echo "WhatsApp plugin install failed (will retry next boot)"
 fi
 
-# Persist gcalcli OAuth credentials on the mounted volume and expose default gcalcli auth path.
+# Persist gcalcli OAuth credentials on the mounted volume.
 GCALCLI_DIR="/root/.openclaw/credentials/gcalcli"
-GCALCLI_OAUTH_FILE="$GCALCLI_DIR/oauth"
+GCALCLI_STATE_FILE="$GCALCLI_DIR/oauth"
+GCALCLI_RUNTIME_FILE="/root/.gcalcli_oauth"
 mkdir -p "$GCALCLI_DIR"
-ln -sf "$GCALCLI_OAUTH_FILE" /root/.gcalcli_oauth
 
 # Optional: inject gcalcli OAuth credentials from Railway variables.
 if [ -n "$GCALCLI_OAUTH_BASE64" ]; then
   echo "Decoding gcalcli OAuth credentials from GCALCLI_OAUTH_BASE64..."
-  echo "$GCALCLI_OAUTH_BASE64" | base64 -d > "$GCALCLI_OAUTH_FILE"
-  chmod 600 "$GCALCLI_OAUTH_FILE"
+  echo "$GCALCLI_OAUTH_BASE64" | base64 -d > "$GCALCLI_STATE_FILE"
+  chmod 600 "$GCALCLI_STATE_FILE"
 fi
 if [ -n "$GCALCLI_OAUTH_JSON" ]; then
   echo "Writing gcalcli OAuth credentials from GCALCLI_OAUTH_JSON..."
-  printf "%s" "$GCALCLI_OAUTH_JSON" > "$GCALCLI_OAUTH_FILE"
-  chmod 600 "$GCALCLI_OAUTH_FILE"
+  printf "%s" "$GCALCLI_OAUTH_JSON" > "$GCALCLI_STATE_FILE"
+  chmod 600 "$GCALCLI_STATE_FILE"
 fi
-if [ -f "$GCALCLI_OAUTH_FILE" ]; then
+
+# gcalcli/oAuth2client rejects symlink auth files; runtime path must be a real file.
+if [ -f "$GCALCLI_STATE_FILE" ]; then
+  cp "$GCALCLI_STATE_FILE" "$GCALCLI_RUNTIME_FILE"
+  chmod 600 "$GCALCLI_RUNTIME_FILE"
   echo "gcalcli OAuth credentials ready"
 else
+  rm -f "$GCALCLI_RUNTIME_FILE"
   echo "gcalcli OAuth credentials missing (Google Calendar will appear disconnected)"
 fi
 
