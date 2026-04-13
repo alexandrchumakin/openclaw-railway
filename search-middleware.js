@@ -15,6 +15,15 @@ const MAX_PAYLOAD_BYTES = 80000;      // total JSON payload forwarded to proxy
 const MAX_IMAGE_DESCRIBE_CHARS = 200; // placeholder text when image is stripped
 const MAX_REQUEST_BODY = 200 * 1024 * 1024; // 200MB — accept large image uploads before stripping
 const RESPONSE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — abort if cursor-api-proxy hangs
+const WHATSAPP_READ_ONLY = parseBooleanEnv(process.env.WHATSAPP_READ_ONLY, true);
+
+function parseBooleanEnv(value, defaultValue) {
+  if (value === undefined || value === null || value === '') return defaultValue;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return defaultValue;
+}
 
 function searchDDG(query) {
   return new Promise((resolve, reject) => {
@@ -71,6 +80,89 @@ function extractUserText(content) {
     return content.substring(lastIdx + 3).trim();
   }
   return content;
+}
+
+// Extract only the OpenClaw metadata wrapper prefix (before the real user text)
+function extractMetadataPrefix(content) {
+  if (!content || typeof content !== 'string') return '';
+  let lastIdx = -1;
+  let searchFrom = 0;
+  while (true) {
+    const idx = content.indexOf('```', searchFrom);
+    if (idx === -1) break;
+    lastIdx = idx;
+    searchFrom = idx + 3;
+  }
+  if (lastIdx > 10) {
+    return content.substring(0, lastIdx + 3);
+  }
+  return '';
+}
+
+// Detect WhatsApp channel from OpenClaw's metadata wrapper only (not user text)
+function isWhatsAppWrappedMessage(content) {
+  const prefix = extractMetadataPrefix(content);
+  if (!prefix) return false;
+  return /\bwhatsapp\b/i.test(prefix)
+    || /"channel"\s*:\s*"whatsapp"/i.test(prefix)
+    || /"source"\s*:\s*"whatsapp"/i.test(prefix)
+    || /"platform"\s*:\s*"whatsapp"/i.test(prefix);
+}
+
+function isWhatsAppRequest(payload, rawContent) {
+  if (isWhatsAppWrappedMessage(rawContent)) return true;
+  const text = JSON.stringify(payload || {});
+  if (!text) return false;
+  return /"channel"\s*:\s*"whatsapp"/i.test(text)
+    || /"source"\s*:\s*"whatsapp"/i.test(text)
+    || /"platform"\s*:\s*"whatsapp"/i.test(text);
+}
+
+function sendReadOnlyNoReply(res, options = {}) {
+  const { stream = true, model = 'cursor-proxy/claude-4.6-opus-max-thinking', earlyHeaders = false, keepaliveTimer = null } = options;
+  if (keepaliveTimer) clearInterval(keepaliveTimer);
+
+  const created = Math.floor(Date.now() / 1000);
+  const id = `chatcmpl-readonly-${Date.now()}`;
+
+  if (stream !== false) {
+    if (!earlyHeaders) {
+      res.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        'connection': 'keep-alive',
+      });
+    }
+    const startChunk = {
+      id,
+      object: 'chat.completion.chunk',
+      created,
+      model,
+      choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
+    };
+    const stopChunk = {
+      id,
+      object: 'chat.completion.chunk',
+      created,
+      model,
+      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+    };
+    res.write(`data: ${JSON.stringify(startChunk)}\n\n`);
+    res.write(`data: ${JSON.stringify(stopChunk)}\n\n`);
+    res.end('data: [DONE]\n\n');
+    return;
+  }
+
+  const response = {
+    id,
+    object: 'chat.completion',
+    created,
+    model,
+    choices: [{ index: 0, message: { role: 'assistant', content: '' }, finish_reason: 'stop' }],
+    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+  };
+  res.writeHead(200, { 'content-type': 'application/json' });
+  res.end(JSON.stringify(response));
 }
 
 // Strip base64 images from multimodal messages — Cursor CLI is text-only, images cause E2BIG
@@ -217,6 +309,18 @@ async function handleRequest(req, res) {
         if (lastMsg && lastMsg.role === 'user') {
           const rawContent = typeof lastMsg.content === 'string' ? lastMsg.content :
             (Array.isArray(lastMsg.content) ? lastMsg.content.map(c => c.text || '').join(' ') : '');
+
+          // WhatsApp read-only mode: never send LLM-generated replies back to WhatsApp chats/DMs
+          if (WHATSAPP_READ_ONLY && isWhatsAppRequest(payload, rawContent)) {
+            console.log('[search-middleware] WhatsApp read-only mode: suppressing assistant reply');
+            sendReadOnlyNoReply(res, {
+              stream: payload.stream,
+              model: payload.model,
+              earlyHeaders,
+              keepaliveTimer,
+            });
+            return;
+          }
 
           // Extract actual user text from OpenClaw metadata wrapper
           const userText = extractUserText(rawContent);
@@ -542,5 +646,5 @@ async function handleRequest(req, res) {
 }
 
 http.createServer(handleRequest).listen(PORT, '127.0.0.1', () => {
-  console.log(`Search middleware listening on 127.0.0.1:${PORT} -> cursor-proxy:${CURSOR_PROXY_PORT}`);
+  console.log(`Search middleware listening on 127.0.0.1:${PORT} -> cursor-proxy:${CURSOR_PROXY_PORT} (WHATSAPP_READ_ONLY=${WHATSAPP_READ_ONLY})`);
 });
