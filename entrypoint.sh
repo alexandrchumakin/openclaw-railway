@@ -44,6 +44,10 @@ if [ -n "$CHROME_BIN" ]; then
   done
   if ! nc -z 127.0.0.1 "$CHROME_REMOTE_DEBUG_PORT" 2>/dev/null; then
     echo "Chrome remote debugging failed; search-proxy will fall back to local Playwright launch"
+  elif curl -fsS "${CHROME_REMOTE_DEBUG_URL}/json/version" >/dev/null 2>&1; then
+    echo "Chrome CDP endpoint is healthy: ${CHROME_REMOTE_DEBUG_URL}/json/version"
+  else
+    echo "Chrome TCP port is open but CDP endpoint check failed: ${CHROME_REMOTE_DEBUG_URL}/json/version"
   fi
 else
   echo "Chrome binary not found; search-proxy will fall back to local Playwright launch"
@@ -60,6 +64,7 @@ CURSOR_API_KEY="${CURSOR_API_KEY}" \
   CURSOR_BRIDGE_WORKSPACE="/opt/agent-workspace" \
   CURSOR_BRIDGE_CHAT_ONLY_WORKSPACE="false" \
   CURSOR_BRIDGE_FORCE="true" \
+  CURSOR_BRIDGE_APPROVE_MCPS="true" \
   CURSOR_BRIDGE_TIMEOUT_MS="600000" \
   npm start &
 CURSOR_PID=$!

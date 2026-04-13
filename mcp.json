@@ -3,7 +3,7 @@
     "chrome-devtools": {
       "command": "chrome-devtools-mcp",
       "args": [
-        "--browser-url",
+        "--browserUrl",
         "http://127.0.0.1:9222"
       ]
     }
