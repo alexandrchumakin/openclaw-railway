@@ -7,13 +7,47 @@ const { chromium } = require('playwright');
 
 // Shared browser instance (lazy-initialized)
 let browserPromise = null;
+const CHROME_REMOTE_DEBUG_URL = process.env.CHROME_REMOTE_DEBUG_URL || '';
+const DEFAULT_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+function launchLocalChromium() {
+  return chromium.launch({
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-blink-features=AutomationControlled'
+    ],
+  }).then(b => {
+    console.log('[search-proxy] Local Chromium launched');
+    return b;
+  });
+}
+
+async function connectBrowser() {
+  if (CHROME_REMOTE_DEBUG_URL) {
+    try {
+      const browser = await chromium.connectOverCDP(CHROME_REMOTE_DEBUG_URL);
+      console.log(`[search-proxy] Connected to Chrome via CDP: ${CHROME_REMOTE_DEBUG_URL}`);
+      return browser;
+    } catch (e) {
+      console.error(`[search-proxy] CDP connect failed (${CHROME_REMOTE_DEBUG_URL}): ${e.message}`);
+      console.log('[search-proxy] Falling back to local Chromium launch');
+    }
+  }
+  return launchLocalChromium();
+}
 
 function getBrowser() {
   if (!browserPromise) {
-    browserPromise = chromium.launch({
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-    }).then(b => {
-      console.log('[search-proxy] Chromium browser launched');
+    browserPromise = connectBrowser().then(b => {
+      if (b && typeof b.on === 'function') {
+        b.on('disconnected', () => {
+          console.error('[search-proxy] Browser disconnected; will reconnect on next request');
+          browserPromise = null;
+        });
+      }
       return b;
     }).catch(e => {
       console.error('[search-proxy] Failed to launch browser:', e.message);
@@ -27,17 +61,36 @@ function getBrowser() {
 // Pre-launch browser on startup
 getBrowser();
 
+async function createPage(browser) {
+  const existingContexts = typeof browser.contexts === 'function' ? browser.contexts() : [];
+  if (existingContexts.length > 0) {
+    const page = await existingContexts[0].newPage();
+    return { page, contextToClose: null };
+  }
+
+  const context = await browser.newContext({
+    userAgent: DEFAULT_UA,
+    locale: 'nl-NL',
+  });
+  const page = await context.newPage();
+  return { page, contextToClose: context };
+}
+
 async function fetchPageWithBrowser(url, maxChars = 6000) {
   const browser = await getBrowser();
   if (!browser) return '';
 
   let page;
+  let contextToClose = null;
   try {
-    page = await browser.newPage();
-    page.setDefaultTimeout(15000);
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    const created = await createPage(browser);
+    page = created.page;
+    contextToClose = created.contextToClose;
+    page.setDefaultTimeout(30000);
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
     // Wait for JS-rendered content
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(3000);
     const text = await page.evaluate(() => document.body?.innerText || '');
     return text.replace(/\s+/g, ' ').trim().substring(0, maxChars);
   } catch (e) {
@@ -45,6 +98,7 @@ async function fetchPageWithBrowser(url, maxChars = 6000) {
     return '';
   } finally {
     if (page) await page.close().catch(() => {});
+    if (contextToClose) await contextToClose.close().catch(() => {});
   }
 }
 

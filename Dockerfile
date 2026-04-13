@@ -4,6 +4,7 @@ RUN apt-get update && apt-get install -y git socat curl netcat-openbsd python3 p
 
 # Install Playwright with Chromium for fetching JS-heavy pages
 RUN cd /opt && npm install playwright@latest && npx playwright install --with-deps chromium
+RUN npm install -g chrome-devtools-mcp@latest
 
 # Install Cursor CLI (agent)
 RUN curl https://cursor.com/install -fsS | bash
@@ -26,6 +27,8 @@ RUN chmod 700 /root/.openclaw
 # Create agent workspace with rules that forbid web tools (they're sandboxed and always fail)
 RUN mkdir -p /opt/agent-workspace/.cursor/rules
 COPY .cursorrules /opt/agent-workspace/.cursorrules
+COPY mcp.json /opt/agent-workspace/mcp.json
+COPY mcp.json /opt/agent-workspace/.cursor/mcp.json
 
 ENV NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache
 ENV OPENCLAW_NO_RESPAWN=1

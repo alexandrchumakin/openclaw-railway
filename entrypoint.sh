@@ -2,6 +2,52 @@
 set -e
 
 FIRST_BOOT_MARKER="/root/.openclaw/.initialized"
+CHROME_REMOTE_DEBUG_PORT="9222"
+CHROME_REMOTE_DEBUG_URL="http://127.0.0.1:${CHROME_REMOTE_DEBUG_PORT}"
+export CHROME_REMOTE_DEBUG_URL
+
+resolve_chrome_bin() {
+  if command -v google-chrome >/dev/null 2>&1; then command -v google-chrome; return 0; fi
+  if command -v google-chrome-stable >/dev/null 2>&1; then command -v google-chrome-stable; return 0; fi
+  if command -v chromium >/dev/null 2>&1; then command -v chromium; return 0; fi
+  if command -v chromium-browser >/dev/null 2>&1; then command -v chromium-browser; return 0; fi
+  for candidate in /root/.cache/ms-playwright/chromium-*/chrome-linux/chrome; do
+    if [ -x "$candidate" ]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+CHROME_BIN="$(resolve_chrome_bin || true)"
+if [ -n "$CHROME_BIN" ]; then
+  mkdir -p /tmp/chrome-remote-debug-profile
+  "$CHROME_BIN" \
+    --remote-debugging-address=127.0.0.1 \
+    --remote-debugging-port="$CHROME_REMOTE_DEBUG_PORT" \
+    --user-data-dir=/tmp/chrome-remote-debug-profile \
+    --no-first-run \
+    --no-default-browser-check \
+    --disable-dev-shm-usage \
+    --disable-gpu \
+    --disable-blink-features=AutomationControlled \
+    --no-sandbox \
+    --headless=new \
+    about:blank >/tmp/chrome-remote-debug.log 2>&1 &
+  for i in $(seq 1 20); do
+    if nc -z 127.0.0.1 "$CHROME_REMOTE_DEBUG_PORT" 2>/dev/null; then
+      echo "Chrome remote debugging ready at ${CHROME_REMOTE_DEBUG_URL}"
+      break
+    fi
+    sleep 1
+  done
+  if ! nc -z 127.0.0.1 "$CHROME_REMOTE_DEBUG_PORT" 2>/dev/null; then
+    echo "Chrome remote debugging failed; search-proxy will fall back to local Playwright launch"
+  fi
+else
+  echo "Chrome binary not found; search-proxy will fall back to local Playwright launch"
+fi
 
 # Start search proxy (free DuckDuckGo-based web search)
 node /opt/search-proxy.js &

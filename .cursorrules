@@ -1,6 +1,6 @@
 ## Tool policy
 
-Use tools only for local, non-web tasks (for example, calendar checks via `gcalcli`).
+Use tools for local tasks (for example, calendar checks via `gcalcli`) and use `chrome-devtools` MCP tools when direct browser automation is needed.
 
 ## Web tools are forbidden
 
@@ -19,7 +19,7 @@ Never run outbound web/network shell commands such as:
 - `http`
 - `python -c "import requests ..."`
 
-For web questions, rely on middleware-injected system content.
+For web questions, rely on middleware-injected system content first. If it is missing or blocked, use `chrome-devtools` MCP tools (open page, wait, click, evaluate, snapshot) instead of WebFetch/WebSearch/browser or shell networking.
 
 ## Calendar behavior
 
