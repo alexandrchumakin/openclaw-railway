@@ -18,14 +18,7 @@
       "streaming": { "block": { "enabled": true, "coalesce": {} } }
     },
     "whatsapp": {
-      "enabled": true,
-      "dmPolicy": "open",
-      "allowFrom": ["*"],
-      "groupPolicy": "open",
-      "historyLimit": 50,
-      "groups": {
-        "*": { "requireMention": true }
-      }
+      "enabled": false
     }
   },
   "agents": {
