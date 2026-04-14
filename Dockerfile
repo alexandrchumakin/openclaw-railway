@@ -15,7 +15,7 @@ ENV CURSOR_AGENT_BIN="/root/.local/bin/agent"
 RUN npm install -g openclaw@latest grammy @grammyjs/runner @grammyjs/transformer-throttler @grammyjs/types
 RUN openclaw plugins install @openclaw/whatsapp
 # Install missing peer deps INTO OpenClaw's node_modules so jiti can resolve them
-RUN cd /usr/local/lib/node_modules/openclaw && npm install --no-save @buape/carbon @larksuiteoapi/node-sdk
+RUN cd /usr/local/lib/node_modules/openclaw && npm install --no-save --legacy-peer-deps @buape/carbon @larksuiteoapi/node-sdk
 
 # Install cursor-api-proxy
 RUN cd /opt && git clone https://github.com/anyrobert/cursor-api-proxy.git && \
