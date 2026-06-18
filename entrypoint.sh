@@ -139,16 +139,41 @@ GCALCLI_STATE_FILE="$GCALCLI_DIR/oauth"
 GCALCLI_RUNTIME_FILE="/root/.gcalcli_oauth"
 mkdir -p "$GCALCLI_DIR"
 
-# Optional: inject gcalcli OAuth credentials from Railway variables.
-if [ -n "$GCALCLI_OAUTH_BASE64" ]; then
-  echo "Decoding gcalcli OAuth credentials from GCALCLI_OAUTH_BASE64..."
-  echo "$GCALCLI_OAUTH_BASE64" | base64 -d > "$GCALCLI_STATE_FILE"
-  chmod 600 "$GCALCLI_STATE_FILE"
+GCALCLI_IMPORT_FROM_ENV=""
+if [ ! -f "$GCALCLI_STATE_FILE" ] || [ -n "$GCALCLI_FORCE_IMPORT" ]; then
+  GCALCLI_IMPORT_FROM_ENV="1"
+elif python3 - "$GCALCLI_STATE_FILE" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1]) as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(1)
+
+sys.exit(0 if data.get("invalid") is True else 1)
+PY
+then
+  GCALCLI_IMPORT_FROM_ENV="1"
 fi
-if [ -n "$GCALCLI_OAUTH_JSON" ]; then
-  echo "Writing gcalcli OAuth credentials from GCALCLI_OAUTH_JSON..."
-  printf "%s" "$GCALCLI_OAUTH_JSON" > "$GCALCLI_STATE_FILE"
-  chmod 600 "$GCALCLI_STATE_FILE"
+
+# Optional: bootstrap gcalcli OAuth credentials from Railway variables.
+# After bootstrap, the mounted volume is authoritative so redeploys do not
+# replace a refreshed credential with a stale environment value.
+if [ -n "$GCALCLI_IMPORT_FROM_ENV" ]; then
+  if [ -n "$GCALCLI_OAUTH_BASE64" ]; then
+    echo "Decoding gcalcli OAuth credentials from GCALCLI_OAUTH_BASE64..."
+    echo "$GCALCLI_OAUTH_BASE64" | base64 -d > "$GCALCLI_STATE_FILE"
+    chmod 600 "$GCALCLI_STATE_FILE"
+  fi
+  if [ -n "$GCALCLI_OAUTH_JSON" ]; then
+    echo "Writing gcalcli OAuth credentials from GCALCLI_OAUTH_JSON..."
+    printf "%s" "$GCALCLI_OAUTH_JSON" > "$GCALCLI_STATE_FILE"
+    chmod 600 "$GCALCLI_STATE_FILE"
+  fi
+elif [ -n "$GCALCLI_OAUTH_BASE64$GCALCLI_OAUTH_JSON" ]; then
+  echo "Keeping persisted gcalcli OAuth credentials from volume"
 fi
 
 # gcalcli/oAuth2client rejects symlink auth files; runtime path must be a real file.

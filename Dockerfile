@@ -41,7 +41,8 @@ COPY router.js /opt/router.js
 COPY node-auto-approve.js /opt/node-auto-approve.js
 COPY wa-link.js /opt/wa-link.js
 COPY openclaw.json /opt/openclaw-template.json
+COPY gcalcli-wrapper.sh /usr/local/bin/gcalcli
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN chmod +x /entrypoint.sh /usr/local/bin/gcalcli
 
 CMD ["/entrypoint.sh"]
