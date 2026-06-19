@@ -52,7 +52,7 @@ README.md               → Human docs
 - **First-boot marker** at `/root/.openclaw/.initialized` — onboard runs only once unless `FORCE_REINIT=1`
 - **Gateway binds to localhost:18789** — cannot be changed, router.js proxies from public $PORT
 - **Cursor agent is sandboxed** — cannot make outbound HTTP. Web tools (WebFetch, WebSearch, browser, curl/wget to internet) are blocked. All web access is handled by the middleware layer.
-- **Tools policy** uses `profile: "minimal"` + runtime allowlist + web denylist so local runtime commands (for example `gcalcli`) can run while web tooling stays blocked.
+- **Tools policy** uses `profile: "minimal"` + web denylist so web tooling stays blocked without relying on version-specific runtime tool groups.
 - **Agent workspace** at `/opt/agent-workspace` — contains `.cursorrules` with web-tool restrictions. Must use `CURSOR_BRIDGE_FORCE=true` (trust workspace) and `CURSOR_BRIDGE_CHAT_ONLY_WORKSPACE=false` (so rules file is read)
 
 ## Environment Variables

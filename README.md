@@ -154,7 +154,7 @@ Simple HTTP fetching (curl, node http) gets blocked by many sites with anti-bot 
 The Cursor Agent CLI runs in a sandbox that blocks outbound HTTP. Web tools fail, so web access is delegated to middleware. Local runtime tools stay enabled for tasks like calendar access.
 
 1. **`.cursorrules`** in the agent workspace explicitly forbids web tools and network shell usage
-2. **`tools: { profile: 'minimal', allow: ['group:runtime'] }`** keeps web tools hidden while allowing local runtime commands (for example `gcalcli`)
+2. **`tools: { profile: 'minimal', deny: ['group:web', 'browser', 'web_fetch', 'web_search'] }`** keeps web tools hidden without relying on version-specific runtime tool groups
 3. **`SOUL.md`** instructs the agent to use pre-fetched content and never claim access is blocked
 
 ## Persistence & State

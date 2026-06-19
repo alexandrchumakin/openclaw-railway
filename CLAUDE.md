@@ -36,7 +36,7 @@ The Cursor Agent CLI is sandboxed — **no outbound HTTP** works from within it:
 - WebSearch — blocked
 - browser — blocked
 
-This is why all web access is handled by the middleware layer BEFORE the agent sees the message. The agent workspace (`/opt/agent-workspace/.cursorrules`) blocks web tools and outbound network shell usage. OpenClaw tools are configured with `profile: 'minimal'` plus a runtime allowlist so local runtime commands (for example calendar CLI) can still run.
+This is why all web access is handled by the middleware layer BEFORE the agent sees the message. The agent workspace (`/opt/agent-workspace/.cursorrules`) blocks web tools and outbound network shell usage. OpenClaw tools are configured with `profile: 'minimal'` plus an explicit web denylist.
 
 ## Key Files
 

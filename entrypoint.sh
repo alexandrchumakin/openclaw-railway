@@ -211,7 +211,6 @@ if (cfg.models?.providers?.['cursor-proxy']) {
 }
 cfg.tools = {
   profile: 'minimal',
-  allow: ['group:runtime'],
   deny: ['group:web', 'browser', 'canvas', 'web_fetch', 'web_search', 'x_search']
 };
 fs.writeFileSync('/root/.openclaw/openclaw.json', JSON.stringify(cfg, null, 2));
