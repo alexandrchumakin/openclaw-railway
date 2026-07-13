@@ -1,0 +1,2 @@
+# Unified diff context markers use one space on otherwise blank lines.
+cursor-api-proxy-cancellation.patch whitespace=-blank-at-eol
