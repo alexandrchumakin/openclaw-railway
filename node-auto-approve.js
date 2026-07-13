@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 
 const GATEWAY_PORT = 18789;
+const GATEWAY_PROTOCOL = 4;
 const LIST_INTERVAL = 15000;  // poll every 15s as backup
 const MAX_RUNTIME = 60 * 60 * 1000; // 1 hour
 
@@ -89,8 +90,8 @@ function startConnection() {
         id: crypto.randomUUID(),
         method: 'connect',
         params: {
-          minProtocol: 3,
-          maxProtocol: 3,
+          minProtocol: GATEWAY_PROTOCOL,
+          maxProtocol: GATEWAY_PROTOCOL,
           client: {
             id: 'openclaw-control-ui',
             version: '1.0.0',

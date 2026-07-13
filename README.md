@@ -4,7 +4,7 @@ Deploy your own AI-powered Telegram bot in minutes. Uses [OpenClaw](https://docs
 
 **What you get:**
 - A personal AI assistant in Telegram that can search the web and read real web pages
-- Powered by Claude 4.6 Opus, GPT-5, or any model supported by your API provider
+- Powered by Claude Opus 4.8, GPT-5, or any model supported by your API provider
 - Free DuckDuckGo search + Playwright headless Chrome for fetching JS-heavy pages
 - Deploys on Railway for ~$5/month (plus your LLM API subscription)
 - Persistent conversations across deploys
@@ -29,10 +29,22 @@ In Railway → your service → **Variables**, add:
 |----------|----------|---------------|
 | `CURSOR_API_KEY` | Yes* | Cursor IDE → Settings → API Keys, or run `agent login` |
 | `TELEGRAM_BOT_TOKEN` | Yes | Message [@BotFather](https://t.me/BotFather) on Telegram → `/newbot` |
-| `GCALCLI_OAUTH_BASE64` | No | Base64-encoded gcalcli OAuth file (enables Google Calendar skill in cron/agent turns) |
+| `GCALCLI_OAUTH_BASE64` | No | Base64-encoded gcalcli OAuth file (enables Google Calendar in cron/agent turns) |
+| `GCALCLI_FORCE_IMPORT` | No | Set to `1` for one deploy to rotate an otherwise usable persisted Calendar credential, then remove it |
+| `GCALCLI_ALLOW_TIME_LIMITED_OAUTH` | No | Emergency-only override for seven-day Testing credentials; not durable and rejected by default |
 | `FORCE_REINIT` | No | Set to `1` to force re-onboard, then remove after deploy |
 
 *See "Using OpenAI/ChatGPT instead of Cursor" below for alternatives.
+
+Google OAuth consent apps left in **Testing** issue refresh tokens that expire after seven days. Publish the consent app as **Production** before generating the credential, then encode the newly authorized OAuth file. Startup rejects invalid, expired, or time-limited credentials and runs a live Calendar probe instead of letting `gcalcli` open an interactive authorization flow and block an agent turn.
+
+To rotate the credential without putting it in shell history:
+
+1. Publish the Google OAuth consent app as **Production**, authorize `gcalcli` again, and confirm local `gcalcli --nocolor --nocache agenda now tomorrow` succeeds.
+2. Upload the file through stdin: `base64 < ~/.gcalcli_oauth | tr -d '\n' | railway variable set --stdin GCALCLI_OAUTH_BASE64`.
+3. If the old volume credential is still usable, set `GCALCLI_FORCE_IMPORT=1` for that deploy and remove it after the startup log says `gcalcli live Calendar access ready`.
+
+The mounted-volume credential remains authoritative after import, refreshed state is written atomically under a lock, every command is bounded to 45 seconds, and startup records `ready`, `probe_failed`, or `unavailable` in `/root/.openclaw/credentials/gcalcli/status`.
 
 ### 4. Add a persistent volume
 
@@ -56,7 +68,7 @@ This project defaults to Cursor's API (which gives access to Claude, GPT, and ot
 
 ### Option A: Use cursor-api-proxy with Cursor key (default)
 
-No changes needed. Set `CURSOR_API_KEY` and you get access to all models Cursor supports (Claude 4.6 Opus, GPT-5, etc.).
+No changes needed. Set `CURSOR_API_KEY` and you get access to all models Cursor supports (Claude Opus 4.8, GPT-5, etc.).
 
 ### Option B: Use OpenAI API directly
 
@@ -92,8 +104,8 @@ Telegram Bot ← OpenClaw Gateway ← Search Middleware ← cursor-api-proxy ←
                          (searches DDG + opens pages in Chrome)
 ```
 
-- **Gateway**: OpenClaw on Railway
-- **LLM**: Claude 4.6 Opus (Thinking) via Cursor API key + cursor-api-proxy (or any OpenAI-compatible provider)
+- **Gateway**: OpenClaw on Railway (pinned to `2026.7.1-beta.6` for Telegram stop-timeout recovery)
+- **LLM**: Claude Opus 4.8 Max Thinking via Cursor API key + cursor-api-proxy (or any OpenAI-compatible provider)
 - **Search**: Free DuckDuckGo search (no API key needed)
 - **Page Fetching**: Playwright headless Chromium — opens real web pages, renders JS, extracts text content. Bypasses anti-bot protections that block simple HTTP requests.
 - **Channels**: Telegram bot (primary), web dashboard (limited)
@@ -106,8 +118,8 @@ Telegram Bot ← OpenClaw Gateway ← Search Middleware ← cursor-api-proxy ←
 | OpenClaw Gateway | 18789 | Main gateway, manages sessions, channels, agents |
 | cursor-api-proxy | 8765 | Translates OpenAI API → Cursor Agent CLI |
 | Search Middleware | 8766 | Intercepts LLM calls, detects URLs + search intent, fetches pages via Playwright, injects results, deduplicates responses |
-| Search Proxy | 9876 | DuckDuckGo scraper + Playwright Chrome page fetcher (`/search` + `/fetch?url=`) |
-| Router | $PORT (8080) | Public entry point, routes to gateway + search proxy |
+| Search Proxy | 9876 | Local-only DuckDuckGo scraper + Playwright page fetcher (`/search` + `/fetch?url=`) |
+| Router | $PORT (8080) | Public entry point; all requests stay behind the OpenClaw gateway |
 
 ## Project Structure
 
@@ -119,7 +131,12 @@ Telegram Bot ← OpenClaw Gateway ← Search Middleware ← cursor-api-proxy ←
 ├── .cursorrules            # Cursor agent rules (forbids web tools; allows local runtime tools like gcalcli)
 ├── search-proxy.js         # DuckDuckGo search + Playwright Chrome page fetcher (port 9876)
 ├── search-middleware.js    # Intercepts LLM calls, detects URLs + search, fetches pages, deduplicates responses
-├── router.js               # HTTP/WebSocket router (public port → gateway + search proxy)
+├── router.js               # HTTP/WebSocket router (public port → authenticated gateway)
+├── gcalcli-credential-check.py      # Validates OAuth structure, scope, and refresh lifetime
+├── prepare-gcalcli-credentials.sh   # Atomic Railway env → persistent volume bootstrap + live probe
+├── merge-openclaw-config.js         # Non-destructive model/config/session migration
+├── telegram-health-check.js         # Detects the exact stuck polling restart state
+├── cursor-api-proxy-cancellation.patch # Cancels Cursor children when callers disconnect
 ├── CLAUDE.md               # Instructions for Claude Code agents
 ├── AGENTS.md               # Instructions for Codex CLI / OpenAI agents
 └── README.md               # This file
@@ -132,10 +149,10 @@ The search is transparent to the LLM — it doesn't need to "search" itself. A P
 1. User sends message via Telegram
 2. OpenClaw forwards to Search Middleware (port 8766)
 3. Middleware extracts user text from OpenClaw metadata wrapper
-4. **URL detection**: If the user mentioned any URLs, they are fetched directly via Playwright Chrome (6000 chars each)
+4. **URL detection**: Up to three user-mentioned URLs are fetched directly via Playwright Chrome (2500 chars each)
 5. **Search detection**: Middleware detects search intent (almost every message except greetings/translations)
 6. **DuckDuckGo search**: Queries DDG, filters out ad tracking URLs
-7. **Page fetching**: All 5 search result pages are opened in Playwright Chrome (4000 chars each)
+7. **Page fetching**: Up to three search result pages are opened in Playwright Chrome (1500 chars each)
 8. Steps 4-7 run in parallel for speed. Per-page timeout is 15s, overall timeout is 30s.
 9. Results are injected as a system message before the user's message
 10. The LLM receives enriched context and responds using the provided content
@@ -180,10 +197,10 @@ To wipe all state and start fresh:
 Edit `entrypoint.sh` → `--custom-model-id` parameter:
 
 ```bash
---custom-model-id "claude-4.6-opus-thinking"   # Current default
---custom-model-id "claude-4.6-opus"            # Non-thinking variant
---custom-model-id "gpt-5.4-fast"               # GPT fallback
---custom-model-id "claude-sonnet-4"             # Faster, cheaper
+--custom-model-id "claude-opus-4-8-thinking-max"  # Current default
+--custom-model-id "claude-opus-4-8-high"          # Non-thinking variant
+--custom-model-id "gpt-5.4-fast"                  # GPT fallback
+--custom-model-id "claude-sonnet-5-high"          # Faster alternative
 ```
 
 Also update `openclaw.json` → `agents.defaults.model.primary` to match.
@@ -220,7 +237,7 @@ Edit `search-middleware.js`:
 - `detectSearchIntent()` — controls when search triggers (currently: almost always except greetings)
 - `extractUrls()` — detects URLs in user messages for direct fetching
 - `fetchPage()` — calls search-proxy's `/fetch` endpoint (15s timeout per page, 30s overall)
-- User-mentioned URLs: 6000 chars each; DDG search results: 4000 chars each
+- User-mentioned URLs: 2500 chars each; DDG search results: 1500 chars each
 
 Edit `search-proxy.js`:
 - `fetchPageWithBrowser()` — Playwright page load (15s timeout, 2s JS render wait)

@@ -4,7 +4,54 @@ set -e
 FIRST_BOOT_MARKER="/root/.openclaw/.initialized"
 CHROME_REMOTE_DEBUG_PORT="9222"
 CHROME_REMOTE_DEBUG_URL="http://127.0.0.1:${CHROME_REMOTE_DEBUG_PORT}"
-export CHROME_REMOTE_DEBUG_URL
+PRIMARY_MODEL_ID="claude-opus-4-8-thinking-max"
+export CHROME_REMOTE_DEBUG_URL PRIMARY_MODEL_ID
+
+wait_for_port() {
+  service_name="$1"
+  port="$2"
+  attempts="${3:-30}"
+  for _ in $(seq 1 "$attempts"); do
+    if nc -z 127.0.0.1 "$port" 2>/dev/null; then
+      echo "$service_name ready on port $port"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "$service_name failed to listen on port $port after ${attempts}s" >&2
+  return 1
+}
+
+shutdown() {
+  trap - HUP INT TERM
+  echo "Stopping OpenClaw service processes..."
+  for pid in \
+    ${ROUTER_PID:-} \
+    ${NODE_APPROVE_PID:-} \
+    ${WA_LINK_PID:-} \
+    ${OPENCLAW_PID:-} \
+    ${MIDDLEWARE_PID:-} \
+    ${CURSOR_PID:-} \
+    ${SEARCH_PROXY_PID:-} \
+    ${CHROME_PID:-}
+  do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  for pid in \
+    ${ROUTER_PID:-} \
+    ${NODE_APPROVE_PID:-} \
+    ${WA_LINK_PID:-} \
+    ${OPENCLAW_PID:-} \
+    ${MIDDLEWARE_PID:-} \
+    ${CURSOR_PID:-} \
+    ${SEARCH_PROXY_PID:-} \
+    ${CHROME_PID:-}
+  do
+    wait "$pid" 2>/dev/null || true
+  done
+  exit 0
+}
+trap shutdown HUP INT TERM
 
 resolve_chrome_bin() {
   if command -v google-chrome >/dev/null 2>&1; then command -v google-chrome; return 0; fi
@@ -20,10 +67,50 @@ resolve_chrome_bin() {
   return 1
 }
 
+# OpenClaw beta may migrate persistent state on first start. Keep one verified
+# pre-upgrade archive on the mounted volume as the rollback boundary.
+MIGRATION_BACKUP_DIR="/root/.openclaw/migration-backups/opus48"
+MIGRATION_BACKUP_FILE="$MIGRATION_BACKUP_DIR/pre-upgrade.tar.gz"
+if [ -f "$FIRST_BOOT_MARKER" ] && [ ! -f "$MIGRATION_BACKUP_FILE" ]; then
+  mkdir -p "$MIGRATION_BACKUP_DIR"
+  chmod 700 "$MIGRATION_BACKUP_DIR"
+  rm -f /tmp/openclaw-pre-opus48.tar.gz
+  env \
+    -u CURSOR_API_KEY \
+    -u TELEGRAM_BOT_TOKEN \
+    -u GCALCLI_OAUTH_BASE64 \
+    -u GCALCLI_OAUTH_JSON \
+    -u WHATSAPP_CREDS \
+    openclaw backup create \
+    --output /tmp/openclaw-pre-opus48.tar.gz \
+    --verify
+  mv /tmp/openclaw-pre-opus48.tar.gz "$MIGRATION_BACKUP_FILE"
+  chmod 600 "$MIGRATION_BACKUP_FILE"
+  echo "Verified pre-Opus-4.8 migration backup created"
+fi
+
+# Validate/import Calendar state before any agent-capable process starts, then
+# re-exec PID 1 without the raw Railway credential so /proc/1/environ cannot
+# expose it to a later agent command.
+if [ "${_OPENCLAW_GCALCLI_PREPARED:-}" != "1" ]; then
+  /usr/local/libexec/prepare-gcalcli-credentials
+  exec env \
+    -u GCALCLI_OAUTH_BASE64 \
+    -u GCALCLI_OAUTH_JSON \
+    _OPENCLAW_GCALCLI_PREPARED=1 \
+    /entrypoint.sh
+fi
+
 CHROME_BIN="$(resolve_chrome_bin || true)"
 if [ -n "$CHROME_BIN" ]; then
   mkdir -p /tmp/chrome-remote-debug-profile
-  "$CHROME_BIN" \
+  env \
+    -u CURSOR_API_KEY \
+    -u TELEGRAM_BOT_TOKEN \
+    -u GCALCLI_OAUTH_BASE64 \
+    -u GCALCLI_OAUTH_JSON \
+    -u WHATSAPP_CREDS \
+    "$CHROME_BIN" \
     --remote-debugging-address=127.0.0.1 \
     --remote-debugging-port="$CHROME_REMOTE_DEBUG_PORT" \
     --user-data-dir=/tmp/chrome-remote-debug-profile \
@@ -35,7 +122,8 @@ if [ -n "$CHROME_BIN" ]; then
     --no-sandbox \
     --headless=new \
     about:blank >/tmp/chrome-remote-debug.log 2>&1 &
-  for i in $(seq 1 20); do
+  CHROME_PID=$!
+  for _ in $(seq 1 20); do
     if nc -z 127.0.0.1 "$CHROME_REMOTE_DEBUG_PORT" 2>/dev/null; then
       echo "Chrome remote debugging ready at ${CHROME_REMOTE_DEBUG_URL}"
       break
@@ -54,27 +142,74 @@ else
 fi
 
 # Start search proxy (free DuckDuckGo-based web search)
-node /opt/search-proxy.js &
+env \
+  -u CURSOR_API_KEY \
+  -u TELEGRAM_BOT_TOKEN \
+  -u GCALCLI_OAUTH_BASE64 \
+  -u GCALCLI_OAUTH_JSON \
+  -u WHATSAPP_CREDS \
+  node /opt/search-proxy.js &
+SEARCH_PROXY_PID=$!
 echo "Search proxy started on port 9876"
+wait_for_port "Search proxy" 9876 60
 
 # Start cursor-api-proxy in background (port 8765)
 # Use custom workspace rules to block web tools while allowing local runtime tools (calendar, etc.)
 cd /opt/cursor-api-proxy
-CURSOR_API_KEY="${CURSOR_API_KEY}" \
+env \
+  -u TELEGRAM_BOT_TOKEN \
+  -u GCALCLI_OAUTH_BASE64 \
+  -u GCALCLI_OAUTH_JSON \
+  -u WHATSAPP_CREDS \
+  CURSOR_API_KEY="${CURSOR_API_KEY}" \
   CURSOR_BRIDGE_WORKSPACE="/opt/agent-workspace" \
   CURSOR_BRIDGE_CHAT_ONLY_WORKSPACE="false" \
   CURSOR_BRIDGE_FORCE="true" \
   CURSOR_BRIDGE_APPROVE_MCPS="true" \
-  CURSOR_BRIDGE_TIMEOUT_MS="600000" \
+  CURSOR_BRIDGE_PROMPT_VIA_STDIN="true" \
+  CURSOR_BRIDGE_TIMEOUT_MS="420000" \
   npm start &
 CURSOR_PID=$!
-sleep 3
 echo "Cursor API proxy started on port 8765"
+wait_for_port "Cursor API proxy" 8765 30
+
+cursor_model_available() {
+  curl -fsS --max-time 70 http://127.0.0.1:8765/v1/models | node -e "
+let body = '';
+process.stdin.on('data', chunk => body += chunk);
+process.stdin.on('end', () => {
+  let payload;
+  try { payload = JSON.parse(body); } catch { process.exit(1); }
+  const modelId = process.env.PRIMARY_MODEL_ID;
+  const available = Array.isArray(payload.data) && payload.data.some(model => model.id === modelId);
+  process.exit(available ? 0 : 1);
+});
+"
+}
+
+MODEL_PREFLIGHT_ATTEMPT=1
+while ! cursor_model_available; do
+  if [ "$MODEL_PREFLIGHT_ATTEMPT" -ge 3 ]; then
+    echo "Cursor model preflight failed after $MODEL_PREFLIGHT_ATTEMPT attempts: $PRIMARY_MODEL_ID" >&2
+    exit 1
+  fi
+  echo "Cursor model preflight attempt $MODEL_PREFLIGHT_ATTEMPT failed; retrying in 5s" >&2
+  MODEL_PREFLIGHT_ATTEMPT=$((MODEL_PREFLIGHT_ATTEMPT + 1))
+  sleep 5
+done
+echo "Required Cursor model is available: $PRIMARY_MODEL_ID"
 
 # Start search-injecting middleware between OpenClaw and cursor-api-proxy
-SEARCH_MIDDLEWARE_PORT=8766 node /opt/search-middleware.js &
-sleep 1
+env \
+  -u CURSOR_API_KEY \
+  -u TELEGRAM_BOT_TOKEN \
+  -u GCALCLI_OAUTH_BASE64 \
+  -u GCALCLI_OAUTH_JSON \
+  -u WHATSAPP_CREDS \
+  SEARCH_MIDDLEWARE_PORT=8766 node /opt/search-middleware.js &
+MIDDLEWARE_PID=$!
 echo "Search middleware started on port 8766"
+wait_for_port "Search middleware" 8766 30
 
 # Only run full onboard on first boot (or when forced)
 if [ ! -f "$FIRST_BOOT_MARKER" ] || [ -n "$FORCE_REINIT" ]; then
@@ -91,14 +226,14 @@ if [ ! -f "$FIRST_BOOT_MARKER" ] || [ -n "$FORCE_REINIT" ]; then
     --custom-base-url "http://127.0.0.1:8766/v1" \
     --custom-api-key "unused" \
     --custom-provider-id "cursor-proxy" \
-    --custom-model-id "claude-4.6-opus-max-thinking" \
+    --custom-model-id "$PRIMARY_MODEL_ID" \
     --custom-compatibility openai \
     --skip-channels \
     --skip-daemon \
     --skip-health \
     --skip-skills \
     --skip-ui \
-    --skip-search 2>&1 || echo "Onboard completed"
+    --skip-search
 
   touch "$FIRST_BOOT_MARKER"
 else
@@ -130,60 +265,7 @@ fi
 # Ensure WhatsApp plugin is installed (survives container rebuild)
 if ! openclaw plugins list 2>/dev/null | grep -q whatsapp; then
   echo "Installing WhatsApp plugin..."
-  openclaw plugins install @openclaw/whatsapp 2>&1 || echo "WhatsApp plugin install failed (will retry next boot)"
-fi
-
-# Persist gcalcli OAuth credentials on the mounted volume.
-GCALCLI_DIR="/root/.openclaw/credentials/gcalcli"
-GCALCLI_STATE_FILE="$GCALCLI_DIR/oauth"
-GCALCLI_RUNTIME_FILE="/root/.gcalcli_oauth"
-mkdir -p "$GCALCLI_DIR"
-
-GCALCLI_IMPORT_FROM_ENV=""
-if [ ! -f "$GCALCLI_STATE_FILE" ] || [ -n "$GCALCLI_FORCE_IMPORT" ]; then
-  GCALCLI_IMPORT_FROM_ENV="1"
-elif python3 - "$GCALCLI_STATE_FILE" <<'PY'
-import json
-import sys
-
-try:
-    with open(sys.argv[1]) as fh:
-        data = json.load(fh)
-except Exception:
-    sys.exit(1)
-
-sys.exit(0 if data.get("invalid") is True else 1)
-PY
-then
-  GCALCLI_IMPORT_FROM_ENV="1"
-fi
-
-# Optional: bootstrap gcalcli OAuth credentials from Railway variables.
-# After bootstrap, the mounted volume is authoritative so redeploys do not
-# replace a refreshed credential with a stale environment value.
-if [ -n "$GCALCLI_IMPORT_FROM_ENV" ]; then
-  if [ -n "$GCALCLI_OAUTH_BASE64" ]; then
-    echo "Decoding gcalcli OAuth credentials from GCALCLI_OAUTH_BASE64..."
-    echo "$GCALCLI_OAUTH_BASE64" | base64 -d > "$GCALCLI_STATE_FILE"
-    chmod 600 "$GCALCLI_STATE_FILE"
-  fi
-  if [ -n "$GCALCLI_OAUTH_JSON" ]; then
-    echo "Writing gcalcli OAuth credentials from GCALCLI_OAUTH_JSON..."
-    printf "%s" "$GCALCLI_OAUTH_JSON" > "$GCALCLI_STATE_FILE"
-    chmod 600 "$GCALCLI_STATE_FILE"
-  fi
-elif [ -n "$GCALCLI_OAUTH_BASE64$GCALCLI_OAUTH_JSON" ]; then
-  echo "Keeping persisted gcalcli OAuth credentials from volume"
-fi
-
-# gcalcli/oAuth2client rejects symlink auth files; runtime path must be a real file.
-if [ -f "$GCALCLI_STATE_FILE" ]; then
-  cp "$GCALCLI_STATE_FILE" "$GCALCLI_RUNTIME_FILE"
-  chmod 600 "$GCALCLI_RUNTIME_FILE"
-  echo "gcalcli OAuth credentials ready"
-else
-  rm -f "$GCALCLI_RUNTIME_FILE"
-  echo "gcalcli OAuth credentials missing (Google Calendar will appear disconnected)"
+  openclaw plugins install @openclaw/whatsapp@2026.6.11 2>&1 || echo "WhatsApp plugin install failed (will retry next boot)"
 fi
 
 # Always update SOUL.md and config settings (but preserve sessions/memory)
@@ -192,66 +274,113 @@ mkdir -p /root/.openclaw/workspace /root/.openclaw/agents/main/agent
 sed "s/RAILWAY_DOMAIN/$DOMAIN/g" /opt/SOUL.md > /root/.openclaw/agents/main/agent/SOUL.md
 cp /root/.openclaw/agents/main/agent/SOUL.md /root/.openclaw/workspace/SOUL.md
 
-# Merge template config (preserves auth token and sessions)
-node -e "
-const fs = require('fs');
-const cfg = JSON.parse(fs.readFileSync('/root/.openclaw/openclaw.json','utf8'));
-const tpl = JSON.parse(fs.readFileSync('/opt/openclaw-template.json','utf8'));
-cfg.gateway = {...(cfg.gateway||{}), ...tpl.gateway};
-cfg.channels = tpl.channels;
-if (cfg.models?.providers?.['cursor-proxy']) {
-  const p = cfg.models.providers['cursor-proxy'];
-  p.baseUrl = 'http://127.0.0.1:8766/v1';
-  if (!p.models || !p.models.length) {
-    p.models = [{ id: 'claude-4.6-opus-max-thinking', contextWindow: 200000, maxTokens: 16384 }];
-  } else {
-    for (const m of p.models) { m.contextWindow = 200000; m.maxTokens = 16384; delete m.timeoutMs; }
-  }
-  console.log('Model configs:', p.models.map(m => m.id + ':ctx=' + m.contextWindow).join(', '));
-}
-cfg.tools = {
-  profile: 'minimal',
-  deny: ['group:web', 'browser', 'canvas', 'web_fetch', 'web_search', 'x_search']
-};
-fs.writeFileSync('/root/.openclaw/openclaw.json', JSON.stringify(cfg, null, 2));
-console.log('Provider baseUrl:', cfg.models?.providers?.['cursor-proxy']?.baseUrl);
-"
+# Merge template config and migrate persisted model selections while preserving
+# gateway auth, sessions, and unrelated overrides.
+node /opt/merge-openclaw-config.js
+
+openclaw config validate
 
 # Web search and page fetching are handled by the middleware layer (search-middleware.js + search-proxy.js)
 # No need for Brave API key — middleware uses DuckDuckGo + Playwright Chrome browser
 
 # Start openclaw gateway
-openclaw gateway --port 18789 &
+env \
+  -u CURSOR_API_KEY \
+  -u GCALCLI_OAUTH_BASE64 \
+  -u GCALCLI_OAUTH_JSON \
+  -u WHATSAPP_CREDS \
+  openclaw gateway --port 18789 &
 OPENCLAW_PID=$!
 
 # Wait until gateway is actually listening
 echo "Waiting for gateway to start..."
-for i in $(seq 1 30); do
-  if nc -z 127.0.0.1 18789 2>/dev/null; then
-    echo "Gateway ready on port 18789"
-    break
-  fi
-  sleep 1
-done
+wait_for_port "Gateway" 18789 30
 
-# Extract the generated auth token
-TOKEN=$(node -e "const c=JSON.parse(require('fs').readFileSync('/root/.openclaw/openclaw.json','utf8')); console.log(c.gateway?.auth?.token || 'no-token')")
 DOMAIN="${RAILWAY_PUBLIC_DOMAIN:-localhost}"
 echo "============================================"
-echo "OPENCLAW AUTH TOKEN: $TOKEN"
-echo "https://$DOMAIN/chat?session=main&token=$TOKEN"
+echo "OpenClaw gateway ready: https://$DOMAIN"
 echo "============================================"
 
 # Start node auto-approve daemon (approves Android/remote node pairing requests)
-node /opt/node-auto-approve.js &
+env \
+  -u CURSOR_API_KEY \
+  -u TELEGRAM_BOT_TOKEN \
+  -u GCALCLI_OAUTH_BASE64 \
+  -u GCALCLI_OAUTH_JSON \
+  -u WHATSAPP_CREDS \
+  node /opt/node-auto-approve.js &
+NODE_APPROVE_PID=$!
 echo "Node auto-approve daemon started"
 
 # Start WhatsApp QR code web server (serves scannable QR at /wa-link?token=...)
-node /opt/wa-link.js &
+env \
+  -u CURSOR_API_KEY \
+  -u TELEGRAM_BOT_TOKEN \
+  -u GCALCLI_OAUTH_BASE64 \
+  -u GCALCLI_OAUTH_JSON \
+  -u WHATSAPP_CREDS \
+  node /opt/wa-link.js &
+WA_LINK_PID=$!
 echo "WhatsApp link server started on port 9877"
 
-# Start router (handles both OpenClaw + search proxy on $PORT)
-node /opt/router.js &
+# Start the public router; search services remain bound to localhost.
+env \
+  -u CURSOR_API_KEY \
+  -u TELEGRAM_BOT_TOKEN \
+  -u GCALCLI_OAUTH_BASE64 \
+  -u GCALCLI_OAUTH_JSON \
+  -u WHATSAPP_CREDS \
+  node /opt/router.js &
+ROUTER_PID=$!
+wait_for_port "Router" "${PORT:-8080}" 30
 
-# Wait for openclaw process
-wait $OPENCLAW_PID
+# Exit the container if a critical child dies so Railway can replace the
+# complete process set instead of leaving a partially working deployment.
+SUPERVISOR_TICKS=0
+TELEGRAM_STUCK_CHECKS=0
+while :; do
+  for process in \
+    "search-proxy:$SEARCH_PROXY_PID" \
+    "cursor-api-proxy:$CURSOR_PID" \
+    "search-middleware:$MIDDLEWARE_PID" \
+    "openclaw-gateway:$OPENCLAW_PID" \
+    "router:$ROUTER_PID"
+  do
+    process_name=${process%%:*}
+    process_pid=${process##*:}
+    if ! kill -0 "$process_pid" 2>/dev/null; then
+      echo "Critical process exited: $process_name (pid $process_pid)" >&2
+      wait "$process_pid" 2>/dev/null || true
+      exit 1
+    fi
+  done
+
+  SUPERVISOR_TICKS=$((SUPERVISOR_TICKS + 1))
+  if [ $((SUPERVISOR_TICKS % 6)) -eq 0 ]; then
+    set +e
+    env \
+      -u CURSOR_API_KEY \
+      -u TELEGRAM_BOT_TOKEN \
+      -u GCALCLI_OAUTH_BASE64 \
+      -u GCALCLI_OAUTH_JSON \
+      -u WHATSAPP_CREDS \
+      timeout 20 openclaw channels status --json 2>/dev/null \
+      | node /opt/telegram-health-check.js
+    TELEGRAM_HEALTH_STATUS=$?
+    set -e
+
+    if [ "$TELEGRAM_HEALTH_STATUS" -eq 1 ]; then
+      TELEGRAM_STUCK_CHECKS=$((TELEGRAM_STUCK_CHECKS + 1))
+      echo "Telegram stop-timeout state persists ($TELEGRAM_STUCK_CHECKS/3)" >&2
+      if [ "$TELEGRAM_STUCK_CHECKS" -ge 3 ]; then
+        echo "Restarting container to recover stuck Telegram polling" >&2
+        exit 1
+      fi
+    elif [ "$TELEGRAM_HEALTH_STATUS" -eq 0 ]; then
+      TELEGRAM_STUCK_CHECKS=0
+    else
+      echo "Telegram health check unavailable; leaving gateway running" >&2
+    fi
+  fi
+  sleep 10
+done

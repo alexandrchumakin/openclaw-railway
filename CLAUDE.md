@@ -14,7 +14,7 @@ Telegram/WhatsApp → OpenClaw (18789) → Search Middleware (8766) → cursor-a
                               (searches + fetches page content via real Chrome)
 ```
 
-Traffic flow: Public $PORT → router.js → OpenClaw gateway (18789) or search proxy (9876)
+Traffic flow: Public $PORT → router.js → OpenClaw gateway (18789). Search proxy traffic stays internal.
 
 ### Web Search & Page Fetching Flow
 
@@ -49,7 +49,7 @@ This is why all web access is handled by the middleware layer BEFORE the agent s
 | `.cursorrules` | Cursor agent workspace rules. Forbids web tools/outbound network shell usage while allowing local runtime commands. Copied to `/opt/agent-workspace/` |
 | `search-middleware.js` | Sits between OpenClaw and cursor-api-proxy. Detects search intent + URLs, calls search-proxy for DDG search and Playwright page fetching, injects results. Also deduplicates streaming responses |
 | `search-proxy.js` | DuckDuckGo HTML scraper + Playwright Chromium page fetcher. Provides `/search` (DDG) and `/fetch?url=` (browser) endpoints. Shared browser instance pre-launched on startup |
-| `router.js` | HTTP + WebSocket router. Routes /search and /fetch → search proxy, everything else → OpenClaw |
+| `router.js` | HTTP + WebSocket router. Keeps every public request behind OpenClaw; search/fetch stay localhost-only |
 
 ## Environment Variables (Railway, never in code)
 

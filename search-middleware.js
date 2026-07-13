@@ -3,8 +3,9 @@
 const http = require('http');
 
 const PORT = parseInt(process.env.SEARCH_MIDDLEWARE_PORT || '8766');
-const CURSOR_PROXY_PORT = 8765;
-const SEARCH_PORT = 9876;
+const CURSOR_PROXY_PORT = parseInt(process.env.CURSOR_PROXY_PORT || '8765');
+const SEARCH_PORT = parseInt(process.env.SEARCH_PROXY_PORT || '9876');
+const DEFAULT_MODEL = process.env.PRIMARY_MODEL_ID || 'claude-opus-4-8-thinking-max';
 
 // Payload size limits to avoid E2BIG spawn errors in cursor-api-proxy
 // Linux arg+env limit is ~128KB; keep well under to leave room for command line + env vars
@@ -14,7 +15,10 @@ const MAX_SEARCH_CONTEXT = 15000;     // total injected search context chars
 const MAX_PAYLOAD_BYTES = 80000;      // total JSON payload forwarded to proxy
 const MAX_IMAGE_DESCRIBE_CHARS = 200; // placeholder text when image is stripped
 const MAX_REQUEST_BODY = 200 * 1024 * 1024; // 200MB — accept large image uploads before stripping
-const RESPONSE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — abort if cursor-api-proxy hangs
+const RESPONSE_TIMEOUT_MS = parseInt(process.env.RESPONSE_TIMEOUT_MS || '450000');
+const RESPONSE_IDLE_TIMEOUT_MS = parseInt(process.env.RESPONSE_IDLE_TIMEOUT_MS || '300000');
+const SEARCH_REQUEST_TIMEOUT_MS = parseInt(process.env.SEARCH_REQUEST_TIMEOUT_MS || '10000');
+const ENRICHMENT_TIMEOUT_MS = parseInt(process.env.ENRICHMENT_TIMEOUT_MS || '30000');
 const WHATSAPP_READ_ONLY = parseBooleanEnv(process.env.WHATSAPP_READ_ONLY, true);
 
 function parseBooleanEnv(value, defaultValue) {
@@ -25,35 +29,86 @@ function parseBooleanEnv(value, defaultValue) {
   return defaultValue;
 }
 
-function searchDDG(query) {
+function createAbortError(message) {
+  const error = new Error(message);
+  error.name = 'AbortError';
+  return error;
+}
+
+function getLocalJson(path, { signal, timeoutMs }) {
   return new Promise((resolve, reject) => {
-    http.get(`http://127.0.0.1:${SEARCH_PORT}/search?q=${encodeURIComponent(query)}&count=3`, (res) => {
+    if (signal?.aborted) {
+      reject(createAbortError('Request was cancelled'));
+      return;
+    }
+
+    let finished = false;
+    let request = null;
+    let response = null;
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const finish = (error, value) => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const cancel = (error) => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      response?.destroy();
+      request?.destroy();
+      reject(error);
+    };
+    const onAbort = () => cancel(createAbortError('Request was cancelled'));
+    const timer = setTimeout(() => {
+      cancel(new Error(`Local search request timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    signal?.addEventListener('abort', onAbort, { once: true });
+
+    request = http.get(`http://127.0.0.1:${SEARCH_PORT}${path}`, (res) => {
+      response = res;
       let data = '';
-      res.on('data', c => data += c);
+      res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
-        try { resolve(JSON.parse(data)); } catch(e) { reject(e); }
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          finish(new Error(`Local search service returned HTTP ${res.statusCode}`));
+          return;
+        }
+        try {
+          finish(null, JSON.parse(data));
+        } catch (error) {
+          finish(error);
+        }
       });
-    }).on('error', reject);
+      res.on('error', (error) => finish(error));
+    });
+    request.on('error', (error) => finish(error));
   });
 }
 
-// Fetch page content via search-proxy's Playwright browser endpoint
-function fetchPage(url, maxChars = 4000) {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(''), 15000);
-    http.get(`http://127.0.0.1:${SEARCH_PORT}/fetch?url=${encodeURIComponent(url)}&maxChars=${maxChars}`, (res) => {
-      let data = '';
-      res.on('data', c => data += c);
-      res.on('end', () => {
-        clearTimeout(timer);
-        try {
-          const json = JSON.parse(data);
-          resolve(json.content || '');
-        } catch(e) { resolve(''); }
-      });
-      res.on('error', () => { clearTimeout(timer); resolve(''); });
-    }).on('error', () => { clearTimeout(timer); resolve(''); });
+function searchDDG(query, signal) {
+  return getLocalJson(`/search?q=${encodeURIComponent(query)}&count=3`, {
+    signal,
+    timeoutMs: SEARCH_REQUEST_TIMEOUT_MS,
   });
+}
+
+// Fetch page content via search-proxy's Playwright browser endpoint.
+async function fetchPage(url, maxChars = 4000, signal) {
+  try {
+    const data = await getLocalJson(`/fetch?url=${encodeURIComponent(url)}&maxChars=${maxChars}`, {
+      signal,
+      timeoutMs: 15000,
+    });
+    return data.content || '';
+  } catch (error) {
+    return '';
+  }
 }
 
 // Extract URLs from user text
@@ -119,7 +174,7 @@ function isWhatsAppRequest(payload, rawContent) {
 }
 
 function sendReadOnlyNoReply(res, options = {}) {
-  const { stream = true, model = 'cursor-proxy/claude-4.6-opus-max-thinking', earlyHeaders = false, keepaliveTimer = null } = options;
+  const { stream = true, model = DEFAULT_MODEL, earlyHeaders = false, keepaliveTimer = null } = options;
   if (keepaliveTimer) clearInterval(keepaliveTimer);
 
   const created = Math.floor(Date.now() / 1000);
@@ -280,6 +335,26 @@ async function handleRequest(req, res) {
     // Track whether we sent early SSE headers (for streaming chat requests)
     let earlyHeaders = false;
     let keepaliveTimer = null;
+    let responseFinished = false;
+    let downstreamClosed = false;
+    let responseTimer = null;
+    let idleTimer = null;
+    let proxyReq = null;
+    let proxyResRef = null;
+    const requestController = new AbortController();
+
+    res.once('finish', () => { responseFinished = true; });
+    res.once('close', () => {
+      if (responseFinished) return;
+      downstreamClosed = true;
+      requestController.abort();
+      clearResponseTimers();
+      clearKeepalive();
+      if (proxyReq) {
+        console.log('[search-middleware] Downstream disconnected; aborting upstream request');
+        abortUpstream();
+      }
+    });
 
     // Only intercept chat completions POST
     if (req.method === 'POST' && req.url.includes('/chat/completions')) {
@@ -323,29 +398,37 @@ async function handleRequest(req, res) {
           }
 
           // Extract actual user text from OpenClaw metadata wrapper
+          armTotalTimer();
           const userText = extractUserText(rawContent);
-          console.log(`[search-middleware] Extracted user text: "${userText.substring(0, 150)}"`);
+          console.log(`[search-middleware] Extracted user text (${userText.length} chars)`);
 
           const query = detectSearchIntent(userText);
 
           // Extract URLs mentioned directly by the user
           const userUrls = extractUrls(userText);
           if (userUrls.length > 0) {
-            console.log(`[search-middleware] User mentioned URLs: ${userUrls.join(', ')}`);
+            console.log(`[search-middleware] User mentioned ${userUrls.length} URL(s)`);
           }
 
           if (query || userUrls.length > 0) {
-            if (query) console.log(`[search-middleware] Search detected: "${query.substring(0, 100)}"`);
+            if (query) console.log('[search-middleware] Search detected');
+            const enrichmentController = new AbortController();
+            const abortEnrichment = () => enrichmentController.abort();
+            requestController.signal.addEventListener('abort', abortEnrichment, { once: true });
+            const enrichmentTimer = setTimeout(() => {
+              console.log('[search-middleware] Enrichment deadline reached; using available snippets');
+              enrichmentController.abort();
+            }, ENRICHMENT_TIMEOUT_MS);
             try {
               // Fetch user-mentioned URLs directly via Playwright (in parallel with search)
               const [directResults, searchResponse] = await Promise.all([
                 userUrls.length > 0 ? Promise.all(userUrls.slice(0, 3).map(async (url) => {
-                  console.log(`[search-middleware] Directly fetching user URL: ${url}`);
-                  const content = await fetchPage(url, MAX_PAGE_CHARS_DIRECT);
+                  const content = await fetchPage(url, MAX_PAGE_CHARS_DIRECT, enrichmentController.signal);
                   return { title: `Page: ${url}`, url, description: 'Directly fetched from user-provided URL', pageContent: content };
                 })) : Promise.resolve([]),
-                query ? searchDDG(query) : Promise.resolve({ web: { results: [] } }),
+                query ? searchDDG(query, enrichmentController.signal) : Promise.resolve({ web: { results: [] } }),
               ]);
+              if (requestController.signal.aborted) return;
 
               const webResults = searchResponse?.web?.results || [];
 
@@ -353,23 +436,15 @@ async function handleRequest(req, res) {
               const fetchedUrls = new Set(userUrls);
               const searchToFetch = webResults.filter(r => !fetchedUrls.has(r.url));
 
-              let fetchRaceTimer;
-              const enrichedSearch = await Promise.race([
-                Promise.all(searchToFetch.slice(0, 3).map(async (r) => {
-                  try {
-                    const content = await fetchPage(r.url, MAX_PAGE_CHARS_SEARCH);
-                    return { ...r, pageContent: content };
-                  } catch(e) {
-                    return { ...r, pageContent: '' };
-                  }
-                })).then(results => { clearTimeout(fetchRaceTimer); return results; }),
-                new Promise(resolve => {
-                  fetchRaceTimer = setTimeout(() => {
-                    console.log('[search-middleware] Page fetch timeout (30s), using snippets only');
-                    resolve(searchToFetch.map(r => ({ ...r, pageContent: '' })));
-                  }, 30000);
-                })
-              ]);
+              const enrichedSearch = await Promise.all(searchToFetch.slice(0, 3).map(async (result) => {
+                const content = await fetchPage(
+                  result.url,
+                  MAX_PAGE_CHARS_SEARCH,
+                  enrichmentController.signal,
+                );
+                return { ...result, pageContent: content };
+              }));
+              if (requestController.signal.aborted) return;
 
               const allResults = [...directResults, ...enrichedSearch];
 
@@ -404,7 +479,12 @@ async function handleRequest(req, res) {
                 console.log(`[search-middleware] Injected ${usedResults} results (${allResults.filter(r => r.pageContent).length} with page content), context: ${searchContext.length} chars`);
               }
             } catch(e) {
-              console.error('[search-middleware] Search error:', e.message);
+              if (!requestController.signal.aborted) {
+                console.error('[search-middleware] Search enrichment unavailable:', e.message);
+              }
+            } finally {
+              clearTimeout(enrichmentTimer);
+              requestController.signal.removeEventListener('abort', abortEnrichment);
             }
           } else {
             console.log(`[search-middleware] No search intent detected`);
@@ -415,21 +495,29 @@ async function handleRequest(req, res) {
       }
     }
 
+    armTotalTimer();
+
+    if (requestController.signal.aborted || downstreamClosed || res.destroyed) {
+      clearKeepalive();
+      return;
+    }
+
     // Trim payload if too large to avoid E2BIG spawn error in cursor-api-proxy
-    if (body.length > MAX_PAYLOAD_BYTES && req.method === 'POST' && req.url.includes('/chat/completions')) {
+    if (Buffer.byteLength(body) > MAX_PAYLOAD_BYTES && req.method === 'POST' && req.url.includes('/chat/completions')) {
       try {
         const payload = JSON.parse(body);
         const messages = payload.messages || [];
+        const payloadBytes = () => Buffer.byteLength(JSON.stringify(payload));
 
         // Strip images again in case new ones appeared
         stripImages(messages);
 
         // Phase 1: Drop older conversation messages (keep first system + last 3)
-        while (messages.length > 4 && JSON.stringify(payload).length > MAX_PAYLOAD_BYTES) {
+        while (messages.length > 4 && payloadBytes() > MAX_PAYLOAD_BYTES) {
           messages.splice(1, 1);
         }
         // Phase 2: Truncate long content in all but the last message
-        if (JSON.stringify(payload).length > MAX_PAYLOAD_BYTES) {
+        if (payloadBytes() > MAX_PAYLOAD_BYTES) {
           for (let i = 0; i < messages.length - 1; i++) {
             if (typeof messages[i].content === 'string' && messages[i].content.length > 1500) {
               messages[i].content = messages[i].content.substring(0, 1500) + '\n[...truncated]';
@@ -437,14 +525,14 @@ async function handleRequest(req, res) {
           }
         }
         // Phase 3: If STILL too large, truncate the last message too
-        if (JSON.stringify(payload).length > MAX_PAYLOAD_BYTES) {
+        if (payloadBytes() > MAX_PAYLOAD_BYTES) {
           const last = messages[messages.length - 1];
           if (typeof last.content === 'string' && last.content.length > 3000) {
             last.content = last.content.substring(0, 3000) + '\n[...truncated]';
           }
         }
         // Phase 4: Nuclear option — keep only system + last user message
-        if (JSON.stringify(payload).length > MAX_PAYLOAD_BYTES && messages.length > 2) {
+        if (payloadBytes() > MAX_PAYLOAD_BYTES && messages.length > 2) {
           const first = messages[0];
           const last = messages[messages.length - 1];
           messages.length = 0;
@@ -453,36 +541,124 @@ async function handleRequest(req, res) {
 
         payload.messages = messages;
         body = JSON.stringify(payload);
-        console.log(`[search-middleware] Trimmed payload to ${body.length} bytes (${messages.length} messages)`);
+        if (Buffer.byteLength(body) > MAX_PAYLOAD_BYTES) {
+          finishHttpError(413, 'Request remains too large after safe context trimming.', 'payload_too_large');
+          return;
+        }
+        console.log(`[search-middleware] Trimmed payload to ${Buffer.byteLength(body)} bytes (${messages.length} messages)`);
       } catch(e) {
         console.error('[search-middleware] Payload trim error:', e.message);
       }
     }
 
-    // Forward to cursor-api-proxy — stream SSE with sentence-level dedup
+    // Forward to cursor-api-proxy — stream SSE with sentence-level dedup.
+    // Keep timeout and cancellation active until the response body finishes;
+    // cursor-api-proxy sends headers before the Cursor child produces output.
     const isChat = req.method === 'POST' && req.url.includes('/chat/completions');
-    let responseTimedOut = false;
-    const proxyReq = http.request({
+
+    function clearKeepalive() {
+      if (keepaliveTimer) {
+        clearInterval(keepaliveTimer);
+        keepaliveTimer = null;
+      }
+    }
+
+    function clearResponseTimers() {
+      if (responseTimer) clearTimeout(responseTimer);
+      if (idleTimer) clearTimeout(idleTimer);
+      responseTimer = null;
+      idleTimer = null;
+    }
+
+    function abortUpstream() {
+      if (proxyResRef && !proxyResRef.destroyed) proxyResRef.destroy();
+      if (proxyReq && !proxyReq.destroyed) proxyReq.destroy();
+    }
+
+    function finishSseError(message, code = 'cursor_proxy_error') {
+      if (responseFinished || downstreamClosed) return;
+      responseFinished = true;
+      clearResponseTimers();
+      clearKeepalive();
+      const event = JSON.stringify({ error: { message, code, type: 'api_error' } });
+      res.end(`data: ${event}\n\ndata: [DONE]\n\n`);
+    }
+
+    function finishHttpError(statusCode, message, type) {
+      if (responseFinished || downstreamClosed) return;
+      responseFinished = true;
+      clearResponseTimers();
+      clearKeepalive();
+      if (earlyHeaders) {
+        const event = JSON.stringify({ error: { message, code: type, type: 'api_error' } });
+        res.end(`data: ${event}\n\ndata: [DONE]\n\n`);
+      } else if (!res.headersSent) {
+        res.writeHead(statusCode, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message, type } }));
+      } else {
+        res.destroy();
+      }
+    }
+
+    function timeoutResponse(kind) {
+      if (responseFinished || downstreamClosed) return;
+      const isIdle = kind === 'idle';
+      const timeoutSeconds = Math.ceil(
+        (isIdle ? RESPONSE_IDLE_TIMEOUT_MS : RESPONSE_TIMEOUT_MS) / 1000,
+      );
+      const message = isIdle
+        ? `Cursor response produced no data for ${timeoutSeconds} seconds.`
+        : `Cursor response timed out after ${timeoutSeconds} seconds.`;
+      console.log(`[search-middleware] ${message} Aborting upstream request`);
+      finishHttpError(504, `${message} Please try again.`, isIdle ? 'idle_timeout' : 'timeout');
+      requestController.abort();
+      abortUpstream();
+    }
+
+    function armTotalTimer() {
+      if (!responseTimer) {
+        responseTimer = setTimeout(() => timeoutResponse('total'), RESPONSE_TIMEOUT_MS);
+      }
+    }
+
+    function armIdleTimer() {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => timeoutResponse('idle'), RESPONSE_IDLE_TIMEOUT_MS);
+    }
+
+    proxyReq = http.request({
       hostname: '127.0.0.1',
       port: CURSOR_PROXY_PORT,
       path: req.url,
       method: req.method,
       headers: { ...req.headers, 'content-length': Buffer.byteLength(body), host: `127.0.0.1:${CURSOR_PROXY_PORT}` },
     }, (proxyRes) => {
-      clearTimeout(responseTimer);
-      if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
-      if (responseTimedOut) return;
+      proxyResRef = proxyRes;
+      armIdleTimer();
+      if (responseFinished || downstreamClosed) {
+        proxyRes.destroy();
+        return;
+      }
 
       if (!isChat) {
         if (!earlyHeaders) res.writeHead(proxyRes.statusCode, proxyRes.headers);
+        proxyRes.on('data', armIdleTimer);
+        proxyRes.on('end', () => {
+          responseFinished = true;
+          clearResponseTimers();
+          clearKeepalive();
+        });
+        proxyRes.on('error', (error) => {
+          finishHttpError(502, `Cursor proxy response failed: ${error.message}`, 'upstream_error');
+        });
         proxyRes.pipe(res);
         return;
       }
 
-      const isSSE = proxyRes.headers['content-type']?.includes('text/event-stream') || earlyHeaders;
+      const isSSE = proxyRes.headers['content-type']?.includes('text/event-stream');
 
       if (isSSE) {
-        // Send headers if not sent early
+        // Send headers if not sent early.
         if (!earlyHeaders) {
           const headers = { ...proxyRes.headers };
           delete headers['content-length'];
@@ -490,20 +666,17 @@ async function handleRequest(req, res) {
           res.writeHead(proxyRes.statusCode, headers);
         }
 
-        // Streaming response with sentence-level dedup
-        // Parse content deltas, buffer at sentence boundaries, skip duplicate sentences
-        let received = '';      // All text content received from upstream
-        let flushedLen = 0;     // Offset into `received` up to which we've flushed
-        let seenSentences = new Set();
+        // Parse content deltas, buffer at sentence boundaries, and skip duplicate sentences.
+        let received = '';
+        let flushedLen = 0;
+        const seenSentences = new Set();
         let stopped = false;
-        let sseLineBuf = '';    // Buffer for partial SSE lines across chunks
-
-        res.on('close', () => { stopped = true; });
+        let sseLineBuf = '';
 
         function emitDelta(text) {
           if (stopped || !text) return;
-          const evt = JSON.stringify({ choices: [{ index: 0, delta: { content: text } }] });
-          res.write(`data: ${evt}\n\n`);
+          const event = JSON.stringify({ choices: [{ index: 0, delta: { content: text } }] });
+          res.write(`data: ${event}\n\n`);
         }
 
         function flushSentences(flush) {
@@ -511,64 +684,99 @@ async function handleRequest(req, res) {
           const pending = received.substring(flushedLen);
           if (!pending) return;
 
-          // Find last sentence boundary: punctuation followed by whitespace or end of string
           let lastEnd = -1;
           for (let i = pending.length - 1; i >= 0; i--) {
             if ('.!?。'.includes(pending[i]) && (i === pending.length - 1 || /\s/.test(pending[i + 1]))) {
-              lastEnd = i; break;
+              lastEnd = i;
+              break;
             }
-            if (pending[i] === '\n') { lastEnd = i; break; }
+            if (pending[i] === '\n') {
+              lastEnd = i;
+              break;
+            }
           }
 
-          if (lastEnd < 0 && !flush) return; // No complete sentence yet, wait for more data
-
+          if (lastEnd < 0 && !flush) return;
           const toProcess = lastEnd >= 0 ? pending.substring(0, lastEnd + 1) : pending;
-
-          // Split into sentences at punctuation + whitespace boundaries
           const sentences = toProcess.split(/(?<=[.!?。])\s+/);
           let output = '';
 
-          for (const s of sentences) {
-            const trimmed = s.trim();
+          for (const sentence of sentences) {
+            const trimmed = sentence.trim();
             if (!trimmed) continue;
-            if (trimmed.length < 15) { output += s + ' '; continue; } // Short fragments pass through
+            if (trimmed.length < 15) {
+              output += sentence + ' ';
+              continue;
+            }
             if (seenSentences.has(trimmed)) {
-              console.log(`[search-middleware] Streaming dedup: skipped duplicate sentence`);
+              console.log('[search-middleware] Streaming dedup: skipped duplicate sentence');
               continue;
             }
             seenSentences.add(trimmed);
-            output += s + ' ';
+            output += sentence + ' ';
           }
 
           if (output.trim()) emitDelta(output);
           flushedLen += toProcess.length;
-          // Skip leading whitespace in remaining buffer
           while (flushedLen < received.length && received[flushedLen] === ' ') flushedLen++;
+        }
+
+        function finishSseSuccess() {
+          if (stopped || responseFinished || downstreamClosed) return;
+          if (!received.trim()) {
+            stopped = true;
+            finishSseError(
+              'Cursor proxy returned an empty streaming response.',
+              'invalid_upstream_response',
+            );
+            return;
+          }
+          flushSentences(true);
+          stopped = true;
+          responseFinished = true;
+          clearResponseTimers();
+          clearKeepalive();
+          res.end('data: [DONE]\n\n');
+        }
+
+        function handleUpstreamError(error) {
+          if (stopped || responseFinished || downstreamClosed) return;
+          flushSentences(true);
+          stopped = true;
+          finishSseError(
+            String(error?.message || 'Cursor CLI request failed.'),
+            String(error?.code || 'cursor_cli_error'),
+          );
         }
 
         proxyRes.on('data', (chunk) => {
           if (stopped) return;
+          armIdleTimer();
           sseLineBuf += chunk.toString();
 
-          // Process complete SSE lines (handle partial lines across chunks)
-          let nlIdx;
-          while ((nlIdx = sseLineBuf.indexOf('\n')) >= 0) {
-            const line = sseLineBuf.substring(0, nlIdx).trim();
-            sseLineBuf = sseLineBuf.substring(nlIdx + 1);
-            if (!line) continue;
-            if (line === 'data: [DONE]') continue; // We send our own [DONE]
-            if (line.startsWith('data: ')) {
-              try {
-                const parsed = JSON.parse(line.slice(6));
-                const delta = parsed.choices?.[0]?.delta?.content || '';
-                if (delta) received += delta;
-              } catch(e) {}
+          let newlineIndex;
+          while ((newlineIndex = sseLineBuf.indexOf('\n')) >= 0) {
+            const line = sseLineBuf.substring(0, newlineIndex).trim();
+            sseLineBuf = sseLineBuf.substring(newlineIndex + 1);
+            if (!line || !line.startsWith('data:')) continue;
+            const data = line.slice(5).trim();
+            if (!data || data === '[DONE]') continue;
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed.error) {
+                handleUpstreamError(parsed.error);
+                abortUpstream();
+                return;
+              }
+              const delta = parsed.choices?.[0]?.delta?.content || '';
+              if (delta) received += delta;
+            } catch (error) {
+              console.log(`[search-middleware] Ignoring malformed upstream SSE frame: ${error.message}`);
             }
           }
 
           flushSentences(false);
 
-          // Block-level repeat detection (catch large repeated blocks)
           if (received.length > 300) {
             for (let blockLen = Math.floor(received.length * 0.3); blockLen <= Math.floor(received.length * 0.55); blockLen++) {
               const block = received.substring(0, blockLen);
@@ -576,71 +784,95 @@ async function handleRequest(req, res) {
               const checkLen = Math.min(100, Math.floor(block.length * 0.4));
               if (checkLen > 20 && rest.trimStart().startsWith(block.substring(0, checkLen).trimStart())) {
                 console.log(`[search-middleware] Streaming dedup: block repeat at char ${blockLen}, stopping`);
-                stopped = true;
-                res.end('\ndata: [DONE]\n\n');
+                finishSseSuccess();
+                abortUpstream();
                 return;
               }
             }
           }
         });
 
-        proxyRes.on('end', () => {
-          if (!stopped) {
-            flushSentences(true); // Flush remaining buffered content
-            res.end('data: [DONE]\n\n');
-          }
+        proxyRes.on('end', finishSseSuccess);
+        proxyRes.on('error', (error) => {
+          handleUpstreamError({ message: `Cursor proxy response failed: ${error.message}`, code: 'upstream_error' });
         });
       } else {
-        // Non-streaming JSON response — buffer and deduplicate fully
+        // Buffer JSON responses. A streaming caller can still receive a JSON
+        // upstream error, so translate it into an SSE error event.
         let responseData = '';
-        proxyRes.on('data', c => responseData += c);
+        proxyRes.on('data', (chunk) => {
+          armIdleTimer();
+          responseData += chunk;
+        });
         proxyRes.on('end', () => {
+          let parsed;
           try {
-            const json = JSON.parse(responseData);
-            let content = json.choices?.[0]?.message?.content || '';
+            parsed = JSON.parse(responseData);
+            const content = parsed.choices?.[0]?.message?.content || '';
             const deduped = deduplicateText(content);
             if (deduped.length < content.length) {
               console.log(`[search-middleware] Deduplicated JSON (${content.length} -> ${deduped.length} chars)`);
-              json.choices[0].message.content = deduped;
-              responseData = JSON.stringify(json);
+              parsed.choices[0].message.content = deduped;
+              responseData = JSON.stringify(parsed);
             }
-          } catch(e) {}
-          if (!earlyHeaders) res.writeHead(proxyRes.statusCode, proxyRes.headers);
+          } catch (error) {
+            parsed = null;
+          }
+
+          const responseContent = parsed?.choices?.[0]?.message?.content;
+          if (
+            !earlyHeaders
+            && proxyRes.statusCode >= 200
+            && proxyRes.statusCode < 300
+            && (typeof responseContent !== 'string' || !responseContent.trim())
+          ) {
+            finishHttpError(
+              502,
+              'Cursor proxy returned an empty or invalid response.',
+              'invalid_upstream_response',
+            );
+            return;
+          }
+
+          if (earlyHeaders) {
+            if (parsed?.error) {
+              finishSseError(
+                String(parsed.error.message || 'Cursor proxy request failed.'),
+                String(parsed.error.code || parsed.error.type || 'cursor_proxy_error'),
+              );
+            } else if (parsed?.choices?.[0]?.message?.content) {
+              const event = JSON.stringify({ choices: [{ index: 0, delta: { content: parsed.choices[0].message.content } }] });
+              responseFinished = true;
+              clearResponseTimers();
+              clearKeepalive();
+              res.end(`data: ${event}\n\ndata: [DONE]\n\n`);
+            } else {
+              finishSseError('Cursor proxy returned a non-streaming invalid response.', 'invalid_upstream_response');
+            }
+            return;
+          }
+
+          responseFinished = true;
+          clearResponseTimers();
+          clearKeepalive();
+          const headers = { ...proxyRes.headers };
+          delete headers['transfer-encoding'];
+          headers['content-length'] = Buffer.byteLength(responseData);
+          res.writeHead(proxyRes.statusCode, headers);
           res.end(responseData);
+        });
+        proxyRes.on('error', (error) => {
+          finishHttpError(502, `Cursor proxy response failed: ${error.message}`, 'upstream_error');
         });
       }
     });
-    proxyReq.on('error', (e) => {
-      if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
-      clearTimeout(responseTimer);
-      if (responseTimedOut) return;
-      if (earlyHeaders) {
-        // Already sent 200 SSE headers — send error as SSE event
-        const errEvt = JSON.stringify({ choices: [{ index: 0, delta: { content: '\n\n[Error: ' + e.message + ']' }, finish_reason: 'stop' }] });
-        res.end(`data: ${errEvt}\n\ndata: [DONE]\n\n`);
-      } else if (!res.headersSent) {
-        res.writeHead(502);
-        res.end('Proxy error: ' + e.message);
-      }
+
+    proxyReq.on('error', (error) => {
+      if (responseFinished || downstreamClosed) return;
+      finishHttpError(502, `Cursor proxy request failed: ${error.message}`, 'proxy_error');
     });
 
-    // 10-minute response timeout — abort if cursor-api-proxy hangs
-    const responseTimer = setTimeout(() => {
-      responseTimedOut = true;
-      proxyReq.destroy();
-      if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
-      console.log('[search-middleware] Response timeout (10 min), aborting request');
-      if (earlyHeaders) {
-        const errEvt = JSON.stringify({ choices: [{ index: 0, delta: { content: '\n\n[Error: Response timed out. Please try again.]' }, finish_reason: 'stop' }] });
-        res.end(`data: ${errEvt}\n\ndata: [DONE]\n\n`);
-      } else if (!res.headersSent) {
-        res.writeHead(504, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({
-          error: { message: 'Response timed out after 10 minutes. Please try again.', type: 'timeout' }
-        }));
-      }
-    }, RESPONSE_TIMEOUT_MS);
-
+    armIdleTimer();
     proxyReq.end(body);
   });
 }

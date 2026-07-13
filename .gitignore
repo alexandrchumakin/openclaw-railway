@@ -3,3 +3,5 @@ node_modules/
 wa-creds-small.txt
 package.json
 package-lock.json
+__pycache__/
+*.pyc
