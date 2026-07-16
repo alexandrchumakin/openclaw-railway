@@ -156,7 +156,7 @@ The search is transparent to the LLM — it doesn't need to "search" itself. A P
 8. Steps 4-7 run in parallel for speed. Per-page timeout is 15s, overall timeout is 30s.
 9. Results are injected as a system message before the user's message
 10. The LLM receives enriched context and responds using the provided content
-11. Response is deduplicated (block-repeat + sentence-level dedup) and sent back through OpenClaw to Telegram
+11. Response is deduplicated (chunk-independent segment dedup + exact block-repeat early stop) and sent back through OpenClaw to Telegram
 
 ### Why Playwright?
 
@@ -245,9 +245,9 @@ Edit `search-proxy.js`:
 
 ### Response Deduplication
 
-Edit `search-middleware.js` → `deduplicateText()`:
-- **Block-repeat detection**: Finds where content starts repeating at any split point (30-55% of text)
-- **Sentence-level dedup**: Splits by sentence boundaries, removes all duplicate sentences
+Edit `search-middleware.js` → `createStreamDeduper()` (shared by the streaming and JSON paths):
+- **Segment-level dedup**: Segments text at stable boundaries (sentence punctuation followed by whitespace, or a newline) computed over the accumulated text — never at network chunk edges. A previously seen segment is dropped only once a run of duplicates is confirmed, so a repeated block collapses while a legitimately repeated single line (code separators, list rows) survives. Kept text is emitted verbatim, so URLs and formatting survive.
+- **Block-repeat early stop**: An exact immediate repeat of the response prefix cuts the stream early (streaming) or truncates the buffered JSON response (also covers text without whitespace after punctuation, e.g. CJK).
 
 ## Troubleshooting
 
@@ -267,8 +267,8 @@ Edit `search-middleware.js` → `deduplicateText()`:
 - Check SOUL.md has the "NEVER try to use WebFetch" rules
 
 ### Duplicate messages
-- The search middleware deduplicates using block-repeat and sentence-level detection
-- Check for `[search-middleware] Dedup:` or `Deduplicated` in logs
+- The search middleware deduplicates repeated segments, including a repeated block after an interstitial paragraph
+- Check for `[search-middleware] Streaming dedup:`, `[search-middleware] Dedup:`, or `Deduplicated` in logs
 
 ### Search not working
 - Check for `[search-proxy] Chromium browser launched` — Playwright must start

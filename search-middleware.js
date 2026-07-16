@@ -1,6 +1,7 @@
 // Middleware between OpenClaw and cursor-api-proxy
 // Intercepts chat completions, detects search intent, injects DuckDuckGo results with page content
 const http = require('http');
+const { StringDecoder } = require('string_decoder');
 
 const PORT = parseInt(process.env.SEARCH_MIDDLEWARE_PORT || '8766');
 const CURSOR_PROXY_PORT = parseInt(process.env.CURSOR_PROXY_PORT || '8765');
@@ -273,11 +274,168 @@ function detectSearchIntent(text) {
   return text;
 }
 
-// Robust deduplication: detects repeated blocks at any split point (used for non-streaming JSON)
+// Deduplication segments text at stable boundaries (sentence punctuation
+// followed by whitespace, or a newline) computed over the accumulated text —
+// never at network chunk edges — so the same content always produces the same
+// segments no matter how it was streamed. Kept text is emitted verbatim, so
+// URLs, newlines, and spacing survive untouched.
+//
+// Cursor's thinking model duplicates whole BLOCKS (often with an interstitial
+// paragraph between the copies), while legitimate answers may repeat a single
+// line (code separators, list rows, refrains). To drop the former without
+// eating the latter, a previously seen segment is dropped only once a run is
+// confirmed: a duplicate followed by another duplicate of at least
+// DEDUP_MIN_SEGMENT_CHARS starts a run, and the run then drops every
+// consecutive duplicate until novel text appears. An isolated duplicate is
+// emitted unchanged.
+const DEDUP_MIN_SEGMENT_CHARS = 15;
+const SENTENCE_ENDINGS = '.!?。';
+
+function isSpaceChar(ch) {
+  return ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n';
+}
+
+function createStreamDeduper({ onSkip } = {}) {
+  let buffer = '';
+  let cursor = 0;
+  const seen = new Set();
+  let dropRun = false;
+  let pending = null; // isolated duplicate held back until the next segment confirms or refutes a run
+  let removed = 0;
+
+  function skip(count) {
+    removed += count;
+    for (let i = 0; i < count; i++) onSkip?.();
+  }
+
+  // End (exclusive, incl. trailing whitespace) of the next complete segment,
+  // or -1 if more data is needed. Unless `final`, a segment only closes once a
+  // non-whitespace character follows its trailing whitespace, so a chunk
+  // boundary can never split a sentence, a URL, or a whitespace run.
+  function findSegmentEnd(final) {
+    for (let i = cursor; i < buffer.length; i++) {
+      const ch = buffer[i];
+      let sepStart = -1;
+      if (ch === '\n') {
+        sepStart = i;
+      } else if (SENTENCE_ENDINGS.includes(ch)) {
+        if (i + 1 < buffer.length && isSpaceChar(buffer[i + 1])) sepStart = i + 1;
+        else if (i + 1 === buffer.length) return final ? buffer.length : -1;
+        else continue;
+      } else {
+        continue;
+      }
+      let sepEnd = sepStart;
+      while (sepEnd < buffer.length && isSpaceChar(buffer[sepEnd])) sepEnd++;
+      if (sepEnd < buffer.length || final) return sepEnd;
+      return -1;
+    }
+    return final && cursor < buffer.length ? buffer.length : -1;
+  }
+
+  // A truncated stream tail that is a strict prefix of an already-seen
+  // segment is the beginning of another duplicate copy, not novel text.
+  function isPrefixOfSeen(key) {
+    for (const existing of seen) {
+      if (existing.length > key.length && existing.startsWith(key)) return true;
+    }
+    return false;
+  }
+
+  function classify(segment, atEof) {
+    const key = segment.replace(/\s+/g, ' ').trim();
+    if (!key) {
+      if (dropRun) return '';
+      if (pending) {
+        pending.text += segment;
+        return '';
+      }
+      return segment;
+    }
+
+    if (!seen.has(key)) {
+      if (atEof && key.length >= DEDUP_MIN_SEGMENT_CHARS && isPrefixOfSeen(key)) {
+        skip(1);
+        return '';
+      }
+      seen.add(key);
+      dropRun = false;
+      if (pending) {
+        const held = pending.text;
+        pending = null;
+        return held + segment;
+      }
+      return segment;
+    }
+
+    if (dropRun) {
+      skip(1);
+      return '';
+    }
+    if (pending) {
+      if (key.length >= DEDUP_MIN_SEGMENT_CHARS) {
+        // Two consecutive duplicates, confirmed by a full sentence: a repeated block.
+        pending = null;
+        dropRun = true;
+        skip(2);
+        return '';
+      }
+      const held = pending.text;
+      pending = { text: segment, key };
+      return held;
+    }
+    pending = { text: segment, key };
+    return '';
+  }
+
+  function drain(final) {
+    let output = '';
+    let end;
+    while ((end = findSegmentEnd(final)) >= 0) {
+      const segment = buffer.slice(cursor, end);
+      const atEof = final && end === buffer.length;
+      cursor = end;
+      output += classify(segment, atEof);
+    }
+    return output;
+  }
+
+  return {
+    push(text) {
+      if (!text) return '';
+      buffer += text;
+      return drain(false);
+    },
+    flush() {
+      let output = drain(true);
+      if (pending) {
+        // An unresolved trailing duplicate: a repeated full sentence at the
+        // very end is model stutter; a short repeat is likely legitimate.
+        if (pending.key.length >= DEDUP_MIN_SEGMENT_CHARS) skip(1);
+        else output += pending.text;
+        pending = null;
+      }
+      return output;
+    },
+    // Drop everything not yet emitted (used when the stream is cut early
+    // because the model started repeating itself wholesale).
+    discard() {
+      cursor = buffer.length;
+      pending = null;
+    },
+    removedCount() {
+      return removed;
+    },
+  };
+}
+
+// Robust deduplication for buffered (non-streaming) responses
 function deduplicateText(text) {
   if (!text || text.length < 60) return text;
 
-  // Strategy 1: Find any position where a block of text is immediately repeated
+  // An exactly doubled answer can lack whitespace after sentence punctuation
+  // entirely (e.g. CJK text), where segment dedup never fires — catch the
+  // anchored immediate repeat first.
   for (let blockLen = Math.floor(text.length * 0.3); blockLen <= Math.floor(text.length * 0.55); blockLen++) {
     const block = text.substring(0, blockLen);
     const rest = text.substring(blockLen);
@@ -288,26 +446,12 @@ function deduplicateText(text) {
     }
   }
 
-  // Strategy 2: Split into sentences/segments, remove consecutive and near-consecutive duplicates
-  const segments = text.split(/(?<=[.!?。\n])(?:\s+|(?=[A-ZА-ЯЁ]))/);
-  if (segments.length > 2) {
-    const unique = [segments[0]];
-    const seen = new Set([segments[0].trim()]);
-    for (let i = 1; i < segments.length; i++) {
-      const s = segments[i].trim();
-      if (!s) continue;
-      if (!seen.has(s)) {
-        unique.push(segments[i]);
-        seen.add(s);
-      }
-    }
-    if (unique.length < segments.length * 0.85) {
-      console.log(`[search-middleware] Dedup: removed ${segments.length - unique.length} duplicate sentences`);
-      return unique.join(' ');
-    }
+  const deduper = createStreamDeduper();
+  const output = deduper.push(text) + deduper.flush();
+  if (deduper.removedCount() > 0) {
+    console.log(`[search-middleware] Dedup: removed ${deduper.removedCount()} duplicate sentences`);
   }
-
-  return text;
+  return output;
 }
 
 async function handleRequest(req, res) {
@@ -424,9 +568,25 @@ async function handleRequest(req, res) {
               const [directResults, searchResponse] = await Promise.all([
                 userUrls.length > 0 ? Promise.all(userUrls.slice(0, 3).map(async (url) => {
                   const content = await fetchPage(url, MAX_PAGE_CHARS_DIRECT, enrichmentController.signal);
-                  return { title: `Page: ${url}`, url, description: 'Directly fetched from user-provided URL', pageContent: content };
+                  return {
+                    title: `Page: ${url}`,
+                    url,
+                    description: content
+                      ? 'Directly fetched from user-provided URL'
+                      : 'User-provided URL (live fetch returned no content this time)',
+                    pageContent: content,
+                  };
                 })) : Promise.resolve([]),
-                query ? searchDDG(query, enrichmentController.signal) : Promise.resolve({ web: { results: [] } }),
+                query
+                  ? searchDDG(query, enrichmentController.signal).catch((error) => {
+                      // A failed DDG search must not discard directly fetched
+                      // user URLs — degrade to an empty result list instead.
+                      if (error?.name !== 'AbortError') {
+                        console.error('[search-middleware] DDG search unavailable, continuing without search results:', error.message);
+                      }
+                      return { web: { results: [] } };
+                    })
+                  : Promise.resolve({ web: { results: [] } }),
               ]);
               if (requestController.signal.aborted) return;
 
@@ -470,9 +630,13 @@ async function handleRequest(req, res) {
                   ? `Fetched pages and search results (via real Chrome browser)`
                   : `Web search results for "${query.substring(0, 80)}" (with page content from browser)`;
 
+                const fetchedCount = allResults.filter(r => r.pageContent).length;
+                const guidance = fetchedCount > 0
+                  ? 'IMPORTANT: Entries above that include "Page content" were fetched successfully using a real Chrome browser. Do NOT say you cannot access these sites. Use the page content to answer with specific details like prices, product names, and links. Always cite source URLs. Entries without page content could not be loaded this time — do not invent their contents.'
+                  : 'NOTE: Live page loads returned no content this time; only the titles and snippets above are available. Use them if helpful, be transparent that fresh page content could not be retrieved, and do not invent details.';
                 messages.splice(messages.length - 1, 0, {
                   role: 'system',
-                  content: `${label}:\n\n${searchContext}\n\nIMPORTANT: All pages above were fetched successfully using a real Chrome browser. Do NOT say you cannot access these sites. Use the page content to answer with specific details like prices, product names, and links. Always cite source URLs.`
+                  content: `${label}:\n\n${searchContext}\n\n${guidance}`
                 });
                 payload.messages = messages;
                 body = JSON.stringify(payload);
@@ -666,59 +830,22 @@ async function handleRequest(req, res) {
           res.writeHead(proxyRes.statusCode, headers);
         }
 
-        // Parse content deltas, buffer at sentence boundaries, and skip duplicate sentences.
+        // Parse content deltas and pass them through the chunk-independent
+        // deduper; emitted text is verbatim upstream text minus duplicates.
         let received = '';
-        let flushedLen = 0;
-        const seenSentences = new Set();
+        const deduper = createStreamDeduper({
+          onSkip: () => console.log('[search-middleware] Streaming dedup: skipped duplicate sentence'),
+        });
         let stopped = false;
         let sseLineBuf = '';
+        // Decode across chunk boundaries — a TCP boundary can fall inside a
+        // multibyte UTF-8 character.
+        const sseDecoder = new StringDecoder('utf8');
 
         function emitDelta(text) {
           if (stopped || !text) return;
           const event = JSON.stringify({ choices: [{ index: 0, delta: { content: text } }] });
           res.write(`data: ${event}\n\n`);
-        }
-
-        function flushSentences(flush) {
-          if (stopped) return;
-          const pending = received.substring(flushedLen);
-          if (!pending) return;
-
-          let lastEnd = -1;
-          for (let i = pending.length - 1; i >= 0; i--) {
-            if ('.!?。'.includes(pending[i]) && (i === pending.length - 1 || /\s/.test(pending[i + 1]))) {
-              lastEnd = i;
-              break;
-            }
-            if (pending[i] === '\n') {
-              lastEnd = i;
-              break;
-            }
-          }
-
-          if (lastEnd < 0 && !flush) return;
-          const toProcess = lastEnd >= 0 ? pending.substring(0, lastEnd + 1) : pending;
-          const sentences = toProcess.split(/(?<=[.!?。])\s+/);
-          let output = '';
-
-          for (const sentence of sentences) {
-            const trimmed = sentence.trim();
-            if (!trimmed) continue;
-            if (trimmed.length < 15) {
-              output += sentence + ' ';
-              continue;
-            }
-            if (seenSentences.has(trimmed)) {
-              console.log('[search-middleware] Streaming dedup: skipped duplicate sentence');
-              continue;
-            }
-            seenSentences.add(trimmed);
-            output += sentence + ' ';
-          }
-
-          if (output.trim()) emitDelta(output);
-          flushedLen += toProcess.length;
-          while (flushedLen < received.length && received[flushedLen] === ' ') flushedLen++;
         }
 
         function finishSseSuccess() {
@@ -731,7 +858,7 @@ async function handleRequest(req, res) {
             );
             return;
           }
-          flushSentences(true);
+          emitDelta(deduper.flush());
           stopped = true;
           responseFinished = true;
           clearResponseTimers();
@@ -741,7 +868,7 @@ async function handleRequest(req, res) {
 
         function handleUpstreamError(error) {
           if (stopped || responseFinished || downstreamClosed) return;
-          flushSentences(true);
+          emitDelta(deduper.flush());
           stopped = true;
           finishSseError(
             String(error?.message || 'Cursor CLI request failed.'),
@@ -752,7 +879,7 @@ async function handleRequest(req, res) {
         proxyRes.on('data', (chunk) => {
           if (stopped) return;
           armIdleTimer();
-          sseLineBuf += chunk.toString();
+          sseLineBuf += sseDecoder.write(chunk);
 
           let newlineIndex;
           while ((newlineIndex = sseLineBuf.indexOf('\n')) >= 0) {
@@ -769,13 +896,14 @@ async function handleRequest(req, res) {
                 return;
               }
               const delta = parsed.choices?.[0]?.delta?.content || '';
-              if (delta) received += delta;
+              if (delta) {
+                received += delta;
+                emitDelta(deduper.push(delta));
+              }
             } catch (error) {
               console.log(`[search-middleware] Ignoring malformed upstream SSE frame: ${error.message}`);
             }
           }
-
-          flushSentences(false);
 
           if (received.length > 300) {
             for (let blockLen = Math.floor(received.length * 0.3); blockLen <= Math.floor(received.length * 0.55); blockLen++) {
@@ -784,6 +912,9 @@ async function handleRequest(req, res) {
               const checkLen = Math.min(100, Math.floor(block.length * 0.4));
               if (checkLen > 20 && rest.trimStart().startsWith(block.substring(0, checkLen).trimStart())) {
                 console.log(`[search-middleware] Streaming dedup: block repeat at char ${blockLen}, stopping`);
+                // The unemitted tail is mid-duplicate — flushing it would leak
+                // a truncated fragment of the repeated copy.
+                deduper.discard();
                 finishSseSuccess();
                 abortUpstream();
                 return;
@@ -799,12 +930,14 @@ async function handleRequest(req, res) {
       } else {
         // Buffer JSON responses. A streaming caller can still receive a JSON
         // upstream error, so translate it into an SSE error event.
+        const responseChunks = [];
         let responseData = '';
         proxyRes.on('data', (chunk) => {
           armIdleTimer();
-          responseData += chunk;
+          responseChunks.push(chunk);
         });
         proxyRes.on('end', () => {
+          responseData = Buffer.concat(responseChunks).toString('utf8');
           let parsed;
           try {
             parsed = JSON.parse(responseData);

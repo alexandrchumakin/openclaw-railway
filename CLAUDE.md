@@ -26,7 +26,7 @@ Traffic flow: Public $PORT → router.js → OpenClaw gateway (18789). Search pr
 6. URL fetches and DDG search run in parallel; DDG ad tracking URLs are filtered out
 7. All results injected as a system message before the user's message
 8. cursor-api-proxy receives enriched context → Cursor Agent CLI responds using the provided content
-9. Response is deduplicated (block-repeat and sentence-level) and sent back through OpenClaw to Telegram/WhatsApp
+9. Response is deduplicated (chunk-independent segment dedup + exact block-repeat early stop) and sent back through OpenClaw to Telegram/WhatsApp
 
 ### Tool Sandbox Constraints
 
@@ -152,8 +152,11 @@ Check deploy logs for:
 - `[search-proxy] Fetching URL via browser:` — Playwright opening a page
 - `[search-proxy] Playwright fetch failed for` — page load timeout or error
 - `[search-middleware] Injected N results (M with page content)` — results added to context
-- `[search-middleware] Dedup: block repeat found` — block-level duplicate detected
-- `[search-middleware] Dedup: removed N duplicate sentences` — sentence-level dedup
+- `[search-middleware] Streaming dedup: skipped duplicate sentence` — duplicate segment dropped from the stream
+- `[search-middleware] Streaming dedup: block repeat at char N, stopping` — exact block repeat detected, stream cut early
+- `[search-middleware] Dedup: block repeat found at char N` — anchored immediate repeat cut (non-streaming JSON)
+- `[search-middleware] Dedup: removed N duplicate sentences` — segment-level dedup (non-streaming JSON)
+- `[search-middleware] DDG search unavailable, continuing without search results` — search failed; direct URL fetches are still injected
 - `[search-middleware] Deduplicated SSE` or `Deduplicated JSON` — response deduplication applied
 
 ### Debug no response
@@ -176,7 +179,7 @@ If the agent says "WebFetch is blocked" or tries curl:
 1. **OpenClaw webchat "rate limit" bug** — The embedded agent always returns "API rate limit reached" for any direct API provider (Groq, OpenAI, Gemini). Telegram channel works because it uses a different code path through cursor-api-proxy.
 2. **Cursor agent sandbox** — All outbound HTTP is blocked (WebFetch, Shell curl, WebSearch). This is a Cursor CLI limitation. The middleware handles all web access instead.
 3. **Dashboard "Unsupported schema node"** — UI rendering bug in OpenClaw's channel config page. Harmless.
-4. **Response deduplication** — Cursor's thinking model sometimes duplicates content. The middleware handles this with block-repeat detection and sentence-level dedup, but edge cases may still occur.
+4. **Response deduplication** — Cursor's thinking model sometimes duplicates content (including a repeated block after an interstitial paragraph). The middleware segments text at stable boundaries (sentence punctuation or newline, never network chunk edges), drops segments whose whitespace-normalized text was already seen, and emits everything else verbatim. Exact immediate block repeats additionally cut the stream early.
 5. **Some sites block even Playwright** — Sites with Captcha/WAF (e.g., Amazon) may return empty content even from headless Chrome. The middleware returns whatever it can get.
 6. **Playwright page timeout** — Some slow sites may exceed the 15s per-page timeout. Check logs for `Playwright fetch failed`.
 7. **WhatsApp QR code linking** — Must be done manually from a Railway shell after first deploy. If the WhatsApp session expires or is revoked from the phone, re-linking is needed via the same process. Max 4 linked devices per WhatsApp account (phone + OpenClaw + 2 others).

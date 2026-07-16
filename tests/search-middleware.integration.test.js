@@ -333,6 +333,182 @@ test('UTF-8 payload limit trims multibyte input before forwarding', async (t) =>
   assert.ok(forwardedBytes <= 80_000, `forwarded ${forwardedBytes} bytes`);
 });
 
+function extractStreamedText(sseBody) {
+  return [...sseBody.matchAll(/^data: (\{.*\})$/gm)]
+    .map((match) => {
+      try { return JSON.parse(match[1]).choices?.[0]?.delta?.content || ''; } catch { return ''; }
+    })
+    .join('');
+}
+
+function sseFrame(content) {
+  return `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content } }] })}\n\n`;
+}
+
+// Writes each piece as a separate delayed socket write so the middleware
+// receives real chunk boundaries instead of one coalesced TCP segment.
+function writeFramesSeparately(response, pieces, gapMs = 25) {
+  let index = 0;
+  const writeNext = () => {
+    if (index < pieces.length) {
+      response.write(pieces[index++]);
+      setTimeout(writeNext, gapMs);
+    } else {
+      response.end('data: [DONE]\n\n');
+    }
+  };
+  writeNext();
+}
+
+test('failed DDG search still injects directly fetched user URLs', async (t) => {
+  let forwardedBody = '';
+  const proxy = http.createServer((request, response) => {
+    let chunks = '';
+    request.on('data', (chunk) => { chunks += chunk; });
+    request.on('end', () => {
+      forwardedBody = chunks;
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end('data: {"choices":[{"index":0,"delta":{"content":"Вот свежие новости из nos.nl за сегодня."}}]}\n\ndata: [DONE]\n\n');
+    });
+  });
+  const proxyPort = await listen(proxy);
+  t.after(() => close(proxy));
+
+  const search = http.createServer((request, response) => {
+    const url = new URL(request.url, 'http://localhost');
+    if (url.pathname === '/search') {
+      response.writeHead(500, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: 'DDG unavailable' }));
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ url: url.searchParams.get('url'), content: 'LIVE NEWS BODY', length: 14 }));
+  });
+  const searchPort = await listen(search);
+  t.after(() => close(search));
+
+  const middleware = await startMiddleware(proxyPort, {
+    SEARCH_PROXY_PORT: String(searchPort),
+    RESPONSE_TIMEOUT_MS: '5000',
+    RESPONSE_IDLE_TIMEOUT_MS: '5000',
+  });
+  t.after(() => middleware.child.kill('SIGTERM'));
+
+  const response = await requestMiddleware(middleware.middlewarePort, {
+    content: 'сводка новостей https://news.example.com/today',
+  });
+
+  assert.match(response.body, /свежие новости/);
+  assert.ok(forwardedBody.includes('LIVE NEWS BODY'), 'directly fetched page content was not injected');
+});
+
+test('streaming dedup drops a repeated block after interstitial text without mangling URLs', async (t) => {
+  const briefing = 'Погода — Weesp\n'
+    + 'Свежую сводку сейчас подтянуть не вышло — не хочу давать цифры наугад.\n'
+    + 'Быстрый просмотр: wttr.in/Weesp\n'
+    + 'Новости\n'
+    + 'Актуальные заголовки на этот раз недоступны. Напрямую: nos.nl\n';
+  const note = 'Note: switching modes could help future briefings come through complete.\n';
+  // Copy 1 is chunked mid-URL, copy 2 arrives whole — dedup must be identical
+  // either way. Frames are written as separate delayed socket writes so the
+  // chunk boundary actually reaches the middleware.
+  const splitAt = briefing.indexOf('wttr.') + 'wttr.'.length;
+  const deltas = [briefing.slice(0, splitAt), briefing.slice(splitAt), note, briefing];
+  const proxy = http.createServer((request, response) => {
+    request.resume();
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    writeFramesSeparately(response, deltas.map(sseFrame));
+  });
+  const proxyPort = await listen(proxy);
+  t.after(() => close(proxy));
+
+  const middleware = await startMiddleware(proxyPort);
+  t.after(() => middleware.child.kill('SIGTERM'));
+
+  const response = await requestMiddleware(middleware.middlewarePort);
+  const text = extractStreamedText(response.body);
+
+  assert.ok(text.includes('wttr.in/Weesp'), 'URL must survive chunk boundaries intact');
+  assert.ok(!text.includes('wttr. in'), 'no whitespace may be injected into a URL');
+  const marker = 'Свежую сводку сейчас подтянуть не вышло';
+  const first = text.indexOf(marker);
+  assert.ok(first >= 0, 'first copy must be emitted');
+  assert.equal(text.indexOf(marker, first + 1), -1, 'repeated block must be deduplicated');
+  assert.ok(text.includes('Note: switching modes'), 'novel interstitial text must be kept');
+});
+
+test('non-duplicated streaming output is forwarded verbatim', async (t) => {
+  const parts = ['Первая строка\nБыстрый просмотр: wttr.', 'in/Weesp\nВторая строка. Конец!'];
+  const proxy = http.createServer((request, response) => {
+    request.resume();
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    writeFramesSeparately(response, parts.map(sseFrame));
+  });
+  const proxyPort = await listen(proxy);
+  t.after(() => close(proxy));
+
+  const middleware = await startMiddleware(proxyPort);
+  t.after(() => middleware.child.kill('SIGTERM'));
+
+  const response = await requestMiddleware(middleware.middlewarePort);
+
+  assert.equal(extractStreamedText(response.body), parts.join(''));
+});
+
+test('legitimately repeated lines inside one response are preserved', async (t) => {
+  const reply = 'Вот скрипт:\n'
+    + '```\n'
+    + 'print("----------------")\n'
+    + 'print(header)\n'
+    + 'print("----------------")\n'
+    + '```\n'
+    + 'Готово.';
+  // Chunked awkwardly so segment boundaries never align with delta boundaries.
+  const deltas = [];
+  for (let i = 0; i < reply.length; i += 13) deltas.push(reply.slice(i, i + 13));
+  const proxy = http.createServer((request, response) => {
+    request.resume();
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    writeFramesSeparately(response, deltas.map(sseFrame), 5);
+  });
+  const proxyPort = await listen(proxy);
+  t.after(() => close(proxy));
+
+  const middleware = await startMiddleware(proxyPort);
+  t.after(() => middleware.child.kill('SIGTERM'));
+
+  const response = await requestMiddleware(middleware.middlewarePort);
+
+  assert.equal(extractStreamedText(response.body), reply);
+});
+
+test('a TCP boundary inside a multibyte character does not corrupt the stream', async (t) => {
+  const content = 'Привет, это тест дедупликации в стриме.';
+  const frame = Buffer.from(sseFrame(content), 'utf8');
+  // Split on a UTF-8 continuation byte inside the Cyrillic payload.
+  let splitAt = -1;
+  for (let i = Math.floor(frame.length / 2); i < frame.length; i++) {
+    if ((frame[i] & 0xc0) === 0x80) { splitAt = i; break; }
+  }
+  assert.ok(splitAt > 0, 'test setup: no multibyte character found');
+  const proxy = http.createServer((request, response) => {
+    request.resume();
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    writeFramesSeparately(response, [frame.subarray(0, splitAt), frame.subarray(splitAt)]);
+  });
+  const proxyPort = await listen(proxy);
+  t.after(() => close(proxy));
+
+  const middleware = await startMiddleware(proxyPort);
+  t.after(() => middleware.child.kill('SIGTERM'));
+
+  const response = await requestMiddleware(middleware.middlewarePort);
+  const text = extractStreamedText(response.body);
+
+  assert.equal(text, content);
+  assert.ok(!text.includes('�'), 'no replacement characters allowed');
+});
+
 test('disconnect during search cancels enrichment and never starts Cursor', async (t) => {
   let cursorRequests = 0;
   const proxy = http.createServer((request, response) => {
