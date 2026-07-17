@@ -22,6 +22,10 @@ const RESPONSE_TIMEOUT_MS = parseInt(process.env.RESPONSE_TIMEOUT_MS || '450000'
 const RESPONSE_IDLE_TIMEOUT_MS = parseInt(process.env.RESPONSE_IDLE_TIMEOUT_MS || '300000');
 const SEARCH_REQUEST_TIMEOUT_MS = parseInt(process.env.SEARCH_REQUEST_TIMEOUT_MS || '10000');
 const ENRICHMENT_TIMEOUT_MS = parseInt(process.env.ENRICHMENT_TIMEOUT_MS || '30000');
+// Per-page budget must cover search-proxy's full Playwright pipeline
+// (domcontentloaded goto + 5s networkidle grace + 3s JS settle) for heavy
+// news sites — 15s starved them and injected empty "no content" entries.
+const PAGE_FETCH_TIMEOUT_MS = parseInt(process.env.PAGE_FETCH_TIMEOUT_MS || '25000');
 const WHATSAPP_READ_ONLY = parseBooleanEnv(process.env.WHATSAPP_READ_ONLY, true);
 
 function parseBooleanEnv(value, defaultValue) {
@@ -113,7 +117,7 @@ async function fetchPage(url, maxChars = 4000, signal) {
   try {
     const data = await getLocalJson(`/fetch?url=${encodeURIComponent(url)}&maxChars=${maxChars}`, {
       signal,
-      timeoutMs: 15000,
+      timeoutMs: PAGE_FETCH_TIMEOUT_MS,
     });
     return data.content || '';
   } catch (error) {

@@ -167,7 +167,7 @@ Check deploy logs for:
 - Check if cursor-api-proxy started: `cursor-api-proxy listening on http://127.0.0.1:8765`
 - Verify workspace: `workspace: /opt/agent-workspace` and `force: true`
 - Check if middleware received request: `[search-middleware] POST /v1/chat/completions`
-- Check if page fetching timed out — Playwright has 15s per page, 30s overall
+- Check if page fetching timed out — Playwright has 25s per page, 30s overall enrichment budget
 - Look for `Response error:` in logs
 - Check for `Workspace Trust Required` error — means `CURSOR_BRIDGE_FORCE` is not set
 
@@ -185,7 +185,7 @@ If the agent says "WebFetch is blocked" or tries curl:
 3. **Dashboard "Unsupported schema node"** — UI rendering bug in OpenClaw's channel config page. Harmless.
 4. **Response deduplication** — Cursor's thinking model sometimes duplicates content (including a repeated block after an interstitial paragraph). The middleware segments text at stable boundaries (sentence punctuation or newline, never network chunk edges), drops segments whose whitespace-normalized text was already seen, and emits everything else verbatim. Exact immediate block repeats additionally cut the stream early. The main duplication source is fixed upstream by `cursor-api-proxy-stream-parser.patch`: a run contains several assistant messages (narration between tool calls + final answer); each streams as `timestamp_ms` chunk events and ends with a full-message repeat (another `timestamp_ms` event for intermediate messages, a snapshot without `timestamp_ms` for the final one). The unpatched bridge re-emitted each message after the first and glued messages together without whitespace.
 5. **Some sites block even Playwright** — Sites with Captcha/WAF (e.g., Amazon) may return empty content even from headless Chrome. The middleware returns whatever it can get.
-6. **Playwright page timeout** — Some slow sites may exceed the 15s per-page timeout. Check logs for `Playwright fetch failed`.
+6. **Playwright page timeout** — Some slow sites may exceed the 25s per-page timeout. Check logs for `Playwright fetch failed`.
 7. **WhatsApp QR code linking** — Must be done manually from a Railway shell after first deploy. If the WhatsApp session expires or is revoked from the phone, re-linking is needed via the same process. Max 4 linked devices per WhatsApp account (phone + OpenClaw + 2 others).
 8. **E2BIG spawn error** — If conversation + search context exceeds ~120KB, cursor-api-proxy's `spawn` fails. The middleware auto-trims payload by dropping older messages and truncating content. Check for `Trimmed payload` in logs.
 
