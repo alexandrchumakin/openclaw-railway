@@ -12,6 +12,8 @@ const DEFAULT_MODEL = process.env.PRIMARY_MODEL_ID || 'claude-opus-4-8-thinking-
 // Linux arg+env limit is ~128KB; keep well under to leave room for command line + env vars
 const MAX_PAGE_CHARS_SEARCH = 1500;   // per search result page
 const MAX_PAGE_CHARS_DIRECT = 2500;   // per user-provided URL
+const MAX_DIRECT_URLS = 5;            // briefing prompts list several sources
+const MAX_DDG_QUERY_CHARS = 300;      // long prompts (briefings) return nothing when sent whole
 const MAX_SEARCH_CONTEXT = 15000;     // total injected search context chars
 const MAX_PAYLOAD_BYTES = 80000;      // total JSON payload forwarded to proxy
 const MAX_IMAGE_DESCRIBE_CHARS = 200; // placeholder text when image is stripped
@@ -92,8 +94,15 @@ function getLocalJson(path, { signal, timeoutMs }) {
   });
 }
 
-function searchDDG(query, signal) {
-  return getLocalJson(`/search?q=${encodeURIComponent(query)}&count=3`, {
+// async so a synchronous throw becomes a rejection handled by the caller's
+// .catch instead of sinking the whole enrichment (direct URL fetches included).
+async function searchDDG(query, signal) {
+  let q = query.slice(0, MAX_DDG_QUERY_CHARS);
+  // Never cut through a surrogate pair — encodeURIComponent throws on a lone
+  // surrogate, and briefing prompts routinely carry emoji.
+  const lastCode = q.charCodeAt(q.length - 1);
+  if (lastCode >= 0xD800 && lastCode <= 0xDBFF) q = q.slice(0, -1);
+  return getLocalJson(`/search?q=${encodeURIComponent(q)}&count=3`, {
     signal,
     timeoutMs: SEARCH_REQUEST_TIMEOUT_MS,
   });
@@ -112,10 +121,36 @@ async function fetchPage(url, maxChars = 4000, signal) {
   }
 }
 
-// Extract URLs from user text
+// Extract URLs from user text. Schemeless sources like "nos.nl" or
+// "wttr.in/Weesp" (common in briefing prompts) are recognized via fixed TLD
+// allowlists. TLDs that are also common words or code suffixes (logger.info,
+// arr.at, ok.it) only count when an explicit /path follows, so ordinary text
+// and identifiers never match; the TLD must be lowercase in the text to avoid
+// abbreviations like "U.S.".
+const DOMAIN_LABELS = '(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\\.)+';
+const SAFE_TLDS = 'com|org|net|io|nl|be|de|fr|es|eu|uk|ru|by|ua|ai|se|dk|pl|cz|ch|fm';
+const PATH_ONLY_TLDS = 'in|at|it|me|no|co|app|dev|info|news|tv';
+const PORT_PART = '(?::\\d{2,5})?';
+const PATH_PART = '\\/[^\\s,)}\\]"\']*';
+const BARE_DOMAIN_REGEX = new RegExp(
+  `(?<![\\w@./-])(${DOMAIN_LABELS}(?:${SAFE_TLDS})(?![A-Za-z0-9-])${PORT_PART}(?:${PATH_PART})?` +
+  `|${DOMAIN_LABELS}(?:${PATH_ONLY_TLDS})(?![A-Za-z0-9-])${PORT_PART}${PATH_PART})`,
+  'g'
+);
+
 function extractUrls(text) {
   const urlRegex = /https?:\/\/[^\s,)}\]"']+/gi;
-  return (text.match(urlRegex) || []).map(u => u.replace(/[.,;:!?]+$/, ''));
+  const urls = (text.match(urlRegex) || []).map(u => u.replace(/[.,;:!?]+$/, ''));
+  const normalizeKey = (u) => u.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+  const seen = new Set(urls.map(normalizeKey));
+  for (const match of text.match(BARE_DOMAIN_REGEX) || []) {
+    const bare = match.replace(/[.,;:!?]+$/, '');
+    const key = normalizeKey(bare);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    urls.push(`https://${bare}`);
+  }
+  return urls;
 }
 
 // Extract actual user text from OpenClaw's metadata wrapper
@@ -566,7 +601,7 @@ async function handleRequest(req, res) {
             try {
               // Fetch user-mentioned URLs directly via Playwright (in parallel with search)
               const [directResults, searchResponse] = await Promise.all([
-                userUrls.length > 0 ? Promise.all(userUrls.slice(0, 3).map(async (url) => {
+                userUrls.length > 0 ? Promise.all(userUrls.slice(0, MAX_DIRECT_URLS).map(async (url) => {
                   const content = await fetchPage(url, MAX_PAGE_CHARS_DIRECT, enrichmentController.signal);
                   return {
                     title: `Page: ${url}`,
@@ -641,6 +676,16 @@ async function handleRequest(req, res) {
                 payload.messages = messages;
                 body = JSON.stringify(payload);
                 console.log(`[search-middleware] Injected ${usedResults} results (${allResults.filter(r => r.pageContent).length} with page content), context: ${searchContext.length} chars`);
+              } else {
+                // Without this note the agent starts narrating tool attempts
+                // to the user when it notices no web content was provided.
+                messages.splice(messages.length - 1, 0, {
+                  role: 'system',
+                  content: 'Live web lookup found no results for this message. Answer from what you know and from any local tools that are available. If fresh web data is essential and unavailable, say so in one short sentence — never describe tools, modes, or internal systems, and never promise to fetch data later.'
+                });
+                payload.messages = messages;
+                body = JSON.stringify(payload);
+                console.log('[search-middleware] No web results; injected no-results guidance');
               }
             } catch(e) {
               if (!requestController.signal.aborted) {

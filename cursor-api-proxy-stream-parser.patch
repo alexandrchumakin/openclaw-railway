@@ -1,0 +1,317 @@
+diff --git a/src/lib/cli-stream-parser.test.ts b/src/lib/cli-stream-parser.test.ts
+index 995ecec..0c472fc 100644
+--- a/src/lib/cli-stream-parser.test.ts
++++ b/src/lib/cli-stream-parser.test.ts
+@@ -1,50 +1,117 @@
+ import { describe, it, expect, vi } from "vitest";
+ import { createStreamParser } from "./cli-stream-parser.js";
+ 
++// Real stream-json shape (cursor-agent 2026.07.09, --stream-partial-output):
++// incremental chunks carry `timestamp_ms`; each message ends with a
++// full-message repeat — a `timestamp_ms` event for intermediate messages, a
++// snapshot without `timestamp_ms` for the final message.
++function chunk(text: string): string {
++  return JSON.stringify({
++    type: "assistant",
++    message: { content: [{ type: "text", text }] },
++    timestamp_ms: 1784300090540,
++  });
++}
++
++function snapshot(text: string): string {
++  return JSON.stringify({
++    type: "assistant",
++    message: { content: [{ type: "text", text }] },
++  });
++}
++
+ describe("createStreamParser", () => {
+-  it("emits incremental text deltas", () => {
++  it("emits incremental chunk text verbatim", () => {
+     const onText = vi.fn();
+-    const onDone = vi.fn();
+-    const parse = createStreamParser(onText, onDone);
++    const parse = createStreamParser(onText, vi.fn());
+ 
+-    parse(JSON.stringify({
+-      type: "assistant",
+-      message: { content: [{ type: "text", text: "Hello" }] },
+-    }));
+-    expect(onText).toHaveBeenCalledTimes(1);
+-    expect(onText).toHaveBeenCalledWith("Hello");
++    parse(chunk("Hello"));
++    parse(chunk(" world"));
+ 
+-    parse(JSON.stringify({
+-      type: "assistant",
+-      message: { content: [{ type: "text", text: "Hello world" }] },
+-    }));
+-    expect(onText).toHaveBeenCalledTimes(2);
+-    expect(onText).toHaveBeenLastCalledWith(" world");
++    expect(onText.mock.calls.map((c) => c[0])).toEqual(["Hello", " world"]);
+   });
+ 
+-  it("deduplicates final full message (skip when text === accumulated)", () => {
++  it("skips the final snapshot that repeats the streamed chunks", () => {
+     const onText = vi.fn();
+-    const onDone = vi.fn();
+-    const parse = createStreamParser(onText, onDone);
++    const parse = createStreamParser(onText, vi.fn());
+ 
+-    parse(JSON.stringify({
+-      type: "assistant",
+-      message: { content: [{ type: "text", text: "Hi" }] },
+-    }));
+-    parse(JSON.stringify({
+-      type: "assistant",
+-      message: { content: [{ type: "text", text: "Hi there" }] },
+-    }));
+-    expect(onText).toHaveBeenCalledTimes(2);
+-    expect(onText).toHaveBeenNthCalledWith(1, "Hi");
+-    expect(onText).toHaveBeenNthCalledWith(2, " there");
++    parse(chunk("Hi"));
++    parse(chunk(" there"));
++    parse(snapshot("Hi there"));
+ 
+-    // Final duplicate: full accumulated text again
+-    parse(JSON.stringify({
+-      type: "assistant",
+-      message: { content: [{ type: "text", text: "Hi there" }] },
+-    }));
+-    expect(onText).toHaveBeenCalledTimes(2); // no new call
++    expect(onText.mock.calls.map((c) => c[0])).toEqual(["Hi", " there"]);
++  });
++
++  it("dedupes narration messages repeated as chunk events and separates messages", () => {
++    // Exact shape captured from a real multi-step run: narration before each
++    // tool call arrives twice as identical chunk events; only the final
++    // answer gets a snapshot without timestamp_ms.
++    const onText = vi.fn();
++    const parse = createStreamParser(onText, vi.fn());
++
++    parse(chunk("I am checking the workspace now."));
++    parse(chunk("I am checking the workspace now."));
++    parse(chunk("Now I am checking the date."));
++    parse(chunk("Now I am checking the date."));
++    parse(chunk("The"));
++    parse(chunk(" workspace has two files."));
++    parse(snapshot("The workspace has two files."));
++
++    expect(onText.mock.calls.map((c) => c[0])).toEqual([
++      "I am checking the workspace now.",
++      "\n\nNow I am checking the date.",
++      "\n\nThe",
++      " workspace has two files.",
++    ]);
++  });
++
++  it("emits a snapshot-only message once and separates it from the previous message", () => {
++    const onText = vi.fn();
++    const parse = createStreamParser(onText, vi.fn());
++
++    parse(snapshot("First."));
++    parse(snapshot("Second."));
++
++    expect(onText.mock.calls.map((c) => c[0])).toEqual([
++      "First.",
++      "\n\nSecond.",
++    ]);
++  });
++
++  it("emits only the missing tail when the snapshot extends the streamed chunks", () => {
++    const onText = vi.fn();
++    const parse = createStreamParser(onText, vi.fn());
++
++    parse(chunk("Hel"));
++    parse(snapshot("Hello"));
++
++    expect(onText.mock.calls.map((c) => c[0])).toEqual(["Hel", "lo"]);
++  });
++
++  it("separates messages even when a narration's closing repeat was lost", () => {
++    const onText = vi.fn();
++    const parse = createStreamParser(onText, vi.fn());
++
++    parse(chunk("Checking the calendar."));
++    // The closing repeat never arrived (e.g. aborted tool call); the final
++    // answer arrives as a snapshot and must not glue onto the narration.
++    parse(snapshot("Everything is booked."));
++
++    expect(onText.mock.calls.map((c) => c[0])).toEqual([
++      "Checking the calendar.",
++      "\n\nEverything is booked.",
++    ]);
++  });
++
++  it("skips a snapshot echoing a message already closed by a chunk repeat", () => {
++    const onText = vi.fn();
++    const parse = createStreamParser(onText, vi.fn());
++
++    parse(chunk("Done."));
++    parse(chunk("Done."));
++    parse(snapshot("Done."));
++
++    expect(onText.mock.calls.map((c) => c[0])).toEqual(["Done."]);
+   });
+ 
+   it("calls onDone when result/success received", () => {
+@@ -63,18 +130,14 @@ describe("createStreamParser", () => {
+     const parse = createStreamParser(onText, onDone);
+ 
+     parse(JSON.stringify({ type: "result", subtype: "success" }));
+-    parse(JSON.stringify({
+-      type: "assistant",
+-      message: { content: [{ type: "text", text: "late" }] },
+-    }));
++    parse(chunk("late"));
+     expect(onText).not.toHaveBeenCalled();
+     expect(onDone).toHaveBeenCalledTimes(1);
+   });
+ 
+-  it("ignores non-assistant lines", () => {
++  it("ignores non-assistant lines and non-text content", () => {
+     const onText = vi.fn();
+-    const onDone = vi.fn();
+-    const parse = createStreamParser(onText, onDone);
++    const parse = createStreamParser(onText, vi.fn());
+ 
+     parse(JSON.stringify({ type: "user", message: {} }));
+     parse(JSON.stringify({ type: "assistant", message: { content: [] } }));
+@@ -94,23 +157,9 @@ describe("createStreamParser", () => {
+     expect(onDone).not.toHaveBeenCalled();
+   });
+ 
+-  it("handles first message as full text (no prefix match)", () => {
+-    const onText = vi.fn();
+-    const onDone = vi.fn();
+-    const parse = createStreamParser(onText, onDone);
+-
+-    parse(JSON.stringify({
+-      type: "assistant",
+-      message: { content: [{ type: "text", text: "Full response" }] },
+-    }));
+-    expect(onText).toHaveBeenCalledTimes(1);
+-    expect(onText).toHaveBeenCalledWith("Full response");
+-  });
+-
+-  it("joins multiple text parts in one message", () => {
++  it("joins multiple text parts in one event", () => {
+     const onText = vi.fn();
+-    const onDone = vi.fn();
+-    const parse = createStreamParser(onText, onDone);
++    const parse = createStreamParser(onText, vi.fn());
+ 
+     parse(JSON.stringify({
+       type: "assistant",
+@@ -121,6 +170,7 @@ describe("createStreamParser", () => {
+           { type: "text", text: "world" },
+         ],
+       },
++      timestamp_ms: 1784300090540,
+     }));
+     expect(onText).toHaveBeenCalledTimes(1);
+     expect(onText).toHaveBeenCalledWith("Hello world");
+diff --git a/src/lib/cli-stream-parser.ts b/src/lib/cli-stream-parser.ts
+index 04a99ab..44c9bee 100644
+--- a/src/lib/cli-stream-parser.ts
++++ b/src/lib/cli-stream-parser.ts
+@@ -1,23 +1,54 @@
+ /**
+  * Create a stateful stream parser for Cursor CLI stream-json output.
+  *
+- * The CLI emits individual assistant delta chunks and then a final assistant
+- * message containing the full accumulated text. We track what we've already
+- * emitted so the final duplicate is skipped.
++ * Measured shape (cursor-agent 2026.07.09, `--stream-partial-output
++ * --output-format stream-json`): a run contains SEVERAL assistant messages
++ * (thinking models narrate between tool calls before the final answer). Each
++ * message streams as incremental chunk events carrying `timestamp_ms`,
++ * followed by one full-message repeat: intermediate messages repeat as
++ * another `timestamp_ms` chunk event, the final message repeats as a
++ * snapshot event without `timestamp_ms`.
++ *
++ * The repeat therefore always equals the text accumulated since the last
++ * message boundary — that equality both dedupes the repeat and marks the
++ * boundary. A single run-wide accumulator (the previous implementation)
++ * re-emitted every message after the first and glued messages together
++ * without whitespace; messages are now separated with a blank line.
++ *
++ * Known limitation: a chunk that happens to exactly equal the accumulated
++ * text of its own message (e.g. "No. " + "No. " split precisely at the
++ * repeat) is indistinguishable from the closing repeat and closes the message
++ * early; the downstream consumer's deduper still guards that pathological
++ * case.
+  */
+ export function createStreamParser(
+   onText: (text: string) => void,
+   onDone: () => void,
+ ): (line: string) => void {
+-  let accumulated = "";
++  let current = ""; // text of the in-flight assistant message emitted so far
++  let lastClosed = ""; // full text of the most recently closed message
++  let emittedAny = false;
+   let done = false;
+ 
++  const emit = (text: string) => {
++    if (!text) return;
++    const separator = emittedAny && !current ? "\n\n" : "";
++    emittedAny = true;
++    onText(separator + text);
++  };
++
++  const close = (fullText: string) => {
++    lastClosed = fullText;
++    current = "";
++  };
++
+   return (line: string) => {
+     if (done) return;
+     try {
+       const obj = JSON.parse(line) as {
+         type?: string;
+         subtype?: string;
++        timestamp_ms?: number;
+         message?: { content?: Array<{ type?: string; text?: string }> };
+       };
+ 
+@@ -28,16 +59,32 @@ export function createStreamParser(
+           .join("");
+         if (!text) return;
+ 
+-        if (text === accumulated) return;
++        // Full-message repeat of the in-flight message closes it.
++        if (current && text === current) {
++          close(text);
++          return;
++        }
++
++        if (typeof obj.timestamp_ms === "number") {
++          // Incremental chunk of the current (possibly new) message.
++          emit(text);
++          current += text;
++          return;
++        }
+ 
+-        if (text.startsWith(accumulated) && accumulated.length > 0) {
+-          const delta = text.slice(accumulated.length);
+-          if (delta) onText(delta);
+-          accumulated = text;
+-        } else {
+-          onText(text);
+-          accumulated += text;
++        // Snapshot without timestamp_ms: an echo of a complete message.
++        if (!current && text === lastClosed) return; // double echo
++        if (current && text.startsWith(current)) {
++          // Chunks were missed; emit only the missing tail.
++          emittedAny = true;
++          onText(text.slice(current.length));
++          close(text);
++          return;
+         }
++        if (current) close(current); // unrelated snapshot: close the chunked message first
++        emit(text);
++        close(text);
++        return;
+       }
+ 
+       if (obj.type === "result" && obj.subtype === "success") {

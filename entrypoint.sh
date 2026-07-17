@@ -101,8 +101,7 @@ if [ "${_OPENCLAW_GCALCLI_PREPARED:-}" != "1" ]; then
     /entrypoint.sh
 fi
 
-CHROME_BIN="$(resolve_chrome_bin || true)"
-if [ -n "$CHROME_BIN" ]; then
+start_chrome() {
   mkdir -p /tmp/chrome-remote-debug-profile
   env \
     -u CURSOR_API_KEY \
@@ -132,11 +131,18 @@ if [ -n "$CHROME_BIN" ]; then
   done
   if ! nc -z 127.0.0.1 "$CHROME_REMOTE_DEBUG_PORT" 2>/dev/null; then
     echo "Chrome remote debugging failed; search-proxy will fall back to local Playwright launch"
-  elif curl -fsS "${CHROME_REMOTE_DEBUG_URL}/json/version" >/dev/null 2>&1; then
+    return 1
+  fi
+  if curl -fsS --max-time 10 "${CHROME_REMOTE_DEBUG_URL}/json/version" >/dev/null 2>&1; then
     echo "Chrome CDP endpoint is healthy: ${CHROME_REMOTE_DEBUG_URL}/json/version"
   else
     echo "Chrome TCP port is open but CDP endpoint check failed: ${CHROME_REMOTE_DEBUG_URL}/json/version"
   fi
+}
+
+CHROME_BIN="$(resolve_chrome_bin || true)"
+if [ -n "$CHROME_BIN" ]; then
+  start_chrome || echo "Continuing without Chrome CDP"
 else
   echo "Chrome binary not found; search-proxy will fall back to local Playwright launch"
 fi
@@ -168,6 +174,8 @@ env \
   CURSOR_BRIDGE_APPROVE_MCPS="true" \
   CURSOR_BRIDGE_PROMPT_VIA_STDIN="true" \
   CURSOR_BRIDGE_TIMEOUT_MS="420000" \
+  CURSOR_BRIDGE_MODE="agent" \
+  CURSOR_BRIDGE_CONTEXT_PREAMBLE="false" \
   npm start &
 CURSOR_PID=$!
 echo "Cursor API proxy started on port 8765"
@@ -338,6 +346,7 @@ wait_for_port "Router" "${PORT:-8080}" 30
 # complete process set instead of leaving a partially working deployment.
 SUPERVISOR_TICKS=0
 TELEGRAM_STUCK_CHECKS=0
+CHROME_RESTART_FAILURES=0
 while :; do
   for process in \
     "search-proxy:$SEARCH_PROXY_PID" \
@@ -354,6 +363,25 @@ while :; do
       exit 1
     fi
   done
+
+  # Chrome is best-effort: the chrome-devtools MCP and CDP page fetching need
+  # it, but search-proxy can fall back to its own Chromium. Restart instead of
+  # failing the container when it dies (e.g. OOM on Railway), and stop trying
+  # after repeated failures so a crash-looping Chrome cannot stall supervision
+  # of the critical processes.
+  if [ -n "$CHROME_BIN" ] && ! kill -0 "${CHROME_PID:-0}" 2>/dev/null; then
+    echo "Chrome remote debugging process died; restarting" >&2
+    wait "${CHROME_PID:-0}" 2>/dev/null || true
+    if start_chrome; then
+      CHROME_RESTART_FAILURES=0
+    else
+      CHROME_RESTART_FAILURES=$((CHROME_RESTART_FAILURES + 1))
+      if [ "$CHROME_RESTART_FAILURES" -ge 3 ]; then
+        echo "Chrome failed to restart $CHROME_RESTART_FAILURES times; disabling Chrome restarts" >&2
+        CHROME_BIN=""
+      fi
+    fi
+  fi
 
   SUPERVISOR_TICKS=$((SUPERVISOR_TICKS + 1))
   if [ $((SUPERVISOR_TICKS % 6)) -eq 0 ]; then

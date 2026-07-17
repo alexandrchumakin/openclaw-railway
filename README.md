@@ -137,6 +137,7 @@ Telegram Bot ← OpenClaw Gateway ← Search Middleware ← cursor-api-proxy ←
 ├── merge-openclaw-config.js         # Non-destructive model/config/session migration
 ├── telegram-health-check.js         # Detects the exact stuck polling restart state
 ├── cursor-api-proxy-cancellation.patch # Cancels Cursor children when callers disconnect
+├── cursor-api-proxy-stream-parser.patch # Per-message stream dedup + blank-line separators between agent messages
 ├── CLAUDE.md               # Instructions for Claude Code agents
 ├── AGENTS.md               # Instructions for Codex CLI / OpenAI agents
 └── README.md               # This file
@@ -149,9 +150,9 @@ The search is transparent to the LLM — it doesn't need to "search" itself. A P
 1. User sends message via Telegram
 2. OpenClaw forwards to Search Middleware (port 8766)
 3. Middleware extracts user text from OpenClaw metadata wrapper
-4. **URL detection**: Up to three user-mentioned URLs are fetched directly via Playwright Chrome (2500 chars each)
+4. **URL detection**: Up to five user-mentioned URLs — including schemeless sources like `nos.nl` or `wttr.in/Weesp` — are fetched directly via Playwright Chrome (2500 chars each). TLDs that are also common words (`.in`, `.at`, `.it`, `.info`, …) only count with an explicit path, so `logger.info` or `ok.it` never trigger fetches
 5. **Search detection**: Middleware detects search intent (almost every message except greetings/translations)
-6. **DuckDuckGo search**: Queries DDG, filters out ad tracking URLs
+6. **DuckDuckGo search**: Queries DDG (query capped at 300 chars so long briefing prompts still return results), filters out ad tracking URLs
 7. **Page fetching**: Up to three search result pages are opened in Playwright Chrome (1500 chars each)
 8. Steps 4-7 run in parallel for speed. Per-page timeout is 15s, overall timeout is 30s.
 9. Results are injected as a system message before the user's message
@@ -173,6 +174,7 @@ The Cursor Agent CLI runs in a sandbox that blocks outbound HTTP. Web tools fail
 1. **`.cursorrules`** in the agent workspace explicitly forbids web tools and network shell usage
 2. **`tools: { profile: 'minimal', deny: ['group:web', 'browser', 'web_fetch', 'web_search'] }`** keeps web tools hidden without relying on version-specific runtime tool groups
 3. **`SOUL.md`** instructs the agent to use pre-fetched content and never claim access is blocked
+4. **`CURSOR_BRIDGE_MODE=agent` + `CURSOR_BRIDGE_CONTEXT_PREAMBLE=false`** — the bridge defaults to read-only `ask` mode and prepends a "Via cursor-api-proxy … mode=ask" preamble; both make the agent narrate its restrictions instead of answering
 
 ## Persistence & State
 

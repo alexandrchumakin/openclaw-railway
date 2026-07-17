@@ -402,6 +402,113 @@ test('failed DDG search still injects directly fetched user URLs', async (t) => 
   assert.ok(forwardedBody.includes('LIVE NEWS BODY'), 'directly fetched page content was not injected');
 });
 
+test('briefing prompt with schemeless sources fetches and injects every listed site', async (t) => {
+  let forwardedBody = '';
+  const proxy = http.createServer((request, response) => {
+    let chunks = '';
+    request.on('data', (chunk) => { chunks += chunk; });
+    request.on('end', () => {
+      forwardedBody = chunks;
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end('data: {"choices":[{"index":0,"delta":{"content":"Готово."}}]}\n\ndata: [DONE]\n\n');
+    });
+  });
+  const proxyPort = await listen(proxy);
+  t.after(() => close(proxy));
+
+  const fetchedUrls = [];
+  let ddgQuery = null;
+  const search = http.createServer((request, response) => {
+    const url = new URL(request.url, 'http://localhost');
+    if (url.pathname === '/search') {
+      ddgQuery = url.searchParams.get('q');
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ web: { results: [] } }));
+      return;
+    }
+    const target = url.searchParams.get('url');
+    fetchedUrls.push(target);
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ url: target, content: `CONTENT OF ${target}`, length: 20 }));
+  });
+  const searchPort = await listen(search);
+  t.after(() => close(search));
+
+  const middleware = await startMiddleware(proxyPort, {
+    SEARCH_PROXY_PORT: String(searchPort),
+    RESPONSE_TIMEOUT_MS: '5000',
+    RESPONSE_IDLE_TIMEOUT_MS: '5000',
+  });
+  t.after(() => middleware.child.kill('SIGTERM'));
+
+  const longTail = 'Составь утренний бриф по разделам, кратко и по делу, без лишних слов. '.repeat(8);
+  const response = await requestMiddleware(middleware.middlewarePort, {
+    content: `${longTail}Погода: wttr.in/Weesp и buienradar.nl. Новости: nos.nl и ad.nl. Локальное: weespernieuws.nl.`,
+  });
+
+  assert.match(response.body, /Готово/);
+  for (const expected of [
+    'https://wttr.in/Weesp',
+    'https://buienradar.nl',
+    'https://nos.nl',
+    'https://ad.nl',
+    'https://weespernieuws.nl',
+  ]) {
+    assert.ok(fetchedUrls.includes(expected), `expected direct fetch of ${expected}, got: ${fetchedUrls.join(', ')}`);
+    assert.ok(forwardedBody.includes(`CONTENT OF ${expected}`), `page content of ${expected} was not injected`);
+  }
+  assert.ok(ddgQuery !== null, 'DDG search must still run');
+  assert.ok(ddgQuery.length <= 300, `DDG query must be capped at 300 chars, got ${ddgQuery.length}`);
+});
+
+test('plain text with abbreviations and file names triggers no direct page fetches', async (t) => {
+  let forwardedBody = '';
+  const proxy = http.createServer((request, response) => {
+    let chunks = '';
+    request.on('data', (chunk) => { chunks += chunk; });
+    request.on('end', () => {
+      forwardedBody = chunks;
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end('data: {"choices":[{"index":0,"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n');
+    });
+  });
+  const proxyPort = await listen(proxy);
+  t.after(() => close(proxy));
+
+  const fetchedUrls = [];
+  const search = http.createServer((request, response) => {
+    const url = new URL(request.url, 'http://localhost');
+    if (url.pathname === '/search') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ web: { results: [] } }));
+      return;
+    }
+    fetchedUrls.push(url.searchParams.get('url'));
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ url: '', content: 'X', length: 1 }));
+  });
+  const searchPort = await listen(search);
+  t.after(() => close(search));
+
+  const middleware = await startMiddleware(proxyPort, {
+    SEARCH_PROXY_PORT: String(searchPort),
+    RESPONSE_TIMEOUT_MS: '5000',
+    RESPONSE_IDLE_TIMEOUT_MS: '5000',
+  });
+  t.after(() => middleware.child.kill('SIGTERM'));
+
+  const response = await requestMiddleware(middleware.middlewarePort, {
+    content: 'The U.S. economy report mentions package.json and node.js updates, e.g. tooling changes',
+  });
+
+  assert.match(response.body, /ok/);
+  assert.deepEqual(fetchedUrls, [], `no page fetches expected, got: ${fetchedUrls.join(', ')}`);
+  assert.ok(
+    forwardedBody.includes('Live web lookup found no results'),
+    'zero-result guidance must be injected so the agent does not narrate tool attempts',
+  );
+});
+
 test('streaming dedup drops a repeated block after interstitial text without mangling URLs', async (t) => {
   const briefing = 'Погода — Weesp\n'
     + 'Свежую сводку сейчас подтянуть не вышло — не хочу давать цифры наугад.\n'

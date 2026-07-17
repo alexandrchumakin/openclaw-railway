@@ -35,12 +35,15 @@ RUN cd /usr/local/lib/node_modules/openclaw && npm install --no-save --legacy-pe
 # Install cursor-api-proxy
 ARG CURSOR_API_PROXY_COMMIT=90b518ea6e8c958e92bc6a48974e525466f6fbe7
 COPY cursor-api-proxy-cancellation.patch /tmp/cursor-api-proxy-cancellation.patch
+COPY cursor-api-proxy-stream-parser.patch /tmp/cursor-api-proxy-stream-parser.patch
 RUN cd /opt && git clone https://github.com/anyrobert/cursor-api-proxy.git && \
     cd cursor-api-proxy && git checkout "$CURSOR_API_PROXY_COMMIT" && \
     git apply --recount --check /tmp/cursor-api-proxy-cancellation.patch && \
     git apply --recount /tmp/cursor-api-proxy-cancellation.patch && \
+    git apply --recount --check /tmp/cursor-api-proxy-stream-parser.patch && \
+    git apply --recount /tmp/cursor-api-proxy-stream-parser.patch && \
     npm ci && npm test && npm run build && \
-    rm /tmp/cursor-api-proxy-cancellation.patch
+    rm /tmp/cursor-api-proxy-cancellation.patch /tmp/cursor-api-proxy-stream-parser.patch
 
 RUN mkdir -p /root/.openclaw/agents/main/sessions /root/.openclaw/credentials/whatsapp
 RUN chmod 700 /root/.openclaw

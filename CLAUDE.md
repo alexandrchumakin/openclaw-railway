@@ -21,8 +21,8 @@ Traffic flow: Public $PORT → router.js → OpenClaw gateway (18789). Search pr
 1. User sends message via Telegram or WhatsApp
 2. OpenClaw forwards to Search Middleware (port 8766)
 3. Middleware extracts user text from OpenClaw metadata wrapper
-4. Middleware detects URLs in user message → fetches them directly via Playwright (6000 chars each)
-5. Middleware detects search intent → searches DuckDuckGo → fetches all 5 result pages via Playwright (4000 chars each)
+4. Middleware detects URLs in user message — including schemeless sources like `nos.nl` or `wttr.in/Weesp` (word-like TLDs such as `.in`/`.info` require an explicit path) — and fetches up to 5 directly via Playwright (2500 chars each)
+5. Middleware detects search intent → searches DuckDuckGo (query capped at 300 chars) → fetches up to 3 result pages via Playwright (1500 chars each)
 6. URL fetches and DDG search run in parallel; DDG ad tracking URLs are filtered out
 7. All results injected as a system message before the user's message
 8. cursor-api-proxy receives enriched context → Cursor Agent CLI responds using the provided content
@@ -50,6 +50,8 @@ This is why all web access is handled by the middleware layer BEFORE the agent s
 | `search-middleware.js` | Sits between OpenClaw and cursor-api-proxy. Detects search intent + URLs, calls search-proxy for DDG search and Playwright page fetching, injects results. Also deduplicates streaming responses |
 | `search-proxy.js` | DuckDuckGo HTML scraper + Playwright Chromium page fetcher. Provides `/search` (DDG) and `/fetch?url=` (browser) endpoints. Shared browser instance pre-launched on startup |
 | `router.js` | HTTP + WebSocket router. Keeps every public request behind OpenClaw; search/fetch stay localhost-only |
+| `cursor-api-proxy-cancellation.patch` | Bridge patch: aborts Cursor child processes when the caller disconnects |
+| `cursor-api-proxy-stream-parser.patch` | Bridge patch: per-message final-snapshot dedup (thinking models emit several assistant messages per run) + blank-line separators between messages |
 
 ## Environment Variables (Railway, never in code)
 
@@ -75,6 +77,7 @@ This is why all web access is handled by the middleware layer BEFORE the agent s
 - **Tools policy** should remain constrained: `profile: "minimal"` with runtime allowlist and explicit web denylist
 - **Tools profile valid values**: `minimal`, `coding`, `messaging`, `full` — `none` is NOT valid
 - **cursor-api-proxy workspace** must be `/opt/agent-workspace` with `CURSOR_BRIDGE_FORCE=true` (workspace trust) and `CURSOR_BRIDGE_CHAT_ONLY_WORKSPACE=false` (so `.cursorrules` is read)
+- **cursor-api-proxy mode** must be `CURSOR_BRIDGE_MODE=agent` with `CURSOR_BRIDGE_CONTEXT_PREAMBLE=false` — the bridge defaults to read-only `ask` mode and injects a "Via cursor-api-proxy … mode=ask" preamble into the prompt; both make the agent narrate its restrictions ("I'm in ask mode, read-only tools…") instead of answering
 
 ## Persistent Volume
 
@@ -157,6 +160,7 @@ Check deploy logs for:
 - `[search-middleware] Dedup: block repeat found at char N` — anchored immediate repeat cut (non-streaming JSON)
 - `[search-middleware] Dedup: removed N duplicate sentences` — segment-level dedup (non-streaming JSON)
 - `[search-middleware] DDG search unavailable, continuing without search results` — search failed; direct URL fetches are still injected
+- `[search-middleware] No web results; injected no-results guidance` — nothing found/fetched; a note is injected so the agent answers instead of narrating tool attempts
 - `[search-middleware] Deduplicated SSE` or `Deduplicated JSON` — response deduplication applied
 
 ### Debug no response
@@ -179,7 +183,7 @@ If the agent says "WebFetch is blocked" or tries curl:
 1. **OpenClaw webchat "rate limit" bug** — The embedded agent always returns "API rate limit reached" for any direct API provider (Groq, OpenAI, Gemini). Telegram channel works because it uses a different code path through cursor-api-proxy.
 2. **Cursor agent sandbox** — All outbound HTTP is blocked (WebFetch, Shell curl, WebSearch). This is a Cursor CLI limitation. The middleware handles all web access instead.
 3. **Dashboard "Unsupported schema node"** — UI rendering bug in OpenClaw's channel config page. Harmless.
-4. **Response deduplication** — Cursor's thinking model sometimes duplicates content (including a repeated block after an interstitial paragraph). The middleware segments text at stable boundaries (sentence punctuation or newline, never network chunk edges), drops segments whose whitespace-normalized text was already seen, and emits everything else verbatim. Exact immediate block repeats additionally cut the stream early.
+4. **Response deduplication** — Cursor's thinking model sometimes duplicates content (including a repeated block after an interstitial paragraph). The middleware segments text at stable boundaries (sentence punctuation or newline, never network chunk edges), drops segments whose whitespace-normalized text was already seen, and emits everything else verbatim. Exact immediate block repeats additionally cut the stream early. The main duplication source is fixed upstream by `cursor-api-proxy-stream-parser.patch`: a run contains several assistant messages (narration between tool calls + final answer); each streams as `timestamp_ms` chunk events and ends with a full-message repeat (another `timestamp_ms` event for intermediate messages, a snapshot without `timestamp_ms` for the final one). The unpatched bridge re-emitted each message after the first and glued messages together without whitespace.
 5. **Some sites block even Playwright** — Sites with Captcha/WAF (e.g., Amazon) may return empty content even from headless Chrome. The middleware returns whatever it can get.
 6. **Playwright page timeout** — Some slow sites may exceed the 15s per-page timeout. Check logs for `Playwright fetch failed`.
 7. **WhatsApp QR code linking** — Must be done manually from a Railway shell after first deploy. If the WhatsApp session expires or is revoked from the phone, re-linking is needed via the same process. Max 4 linked devices per WhatsApp account (phone + OpenClaw + 2 others).
