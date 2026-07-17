@@ -58,7 +58,7 @@ resolve_chrome_bin() {
   if command -v google-chrome-stable >/dev/null 2>&1; then command -v google-chrome-stable; return 0; fi
   if command -v chromium >/dev/null 2>&1; then command -v chromium; return 0; fi
   if command -v chromium-browser >/dev/null 2>&1; then command -v chromium-browser; return 0; fi
-  for candidate in /root/.cache/ms-playwright/chromium-*/chrome-linux/chrome; do
+  for candidate in /root/.cache/ms-playwright/chromium-*/chrome-linux*/chrome; do
     if [ -x "$candidate" ]; then
       echo "$candidate"
       return 0
